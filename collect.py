@@ -820,8 +820,83 @@ def render_degraded(stats: dict) -> str:
     return "\n".join(lines)
 
 
+def write_web_data(items: list[dict], stats: dict, cfg: dict) -> None:
+    """
+    把本轮命中条目与统计导出为 web/data.json，供前端页面读取展示。
+
+    设计原则：
+    - 纯只读旁路：不碰推送、不碰 state.db 水位，网页挂了不影响日报。
+    - 附带组件可读名与分级语义色，前端直接消费，无需二次映射。
+    - 保留历史累积：把本次条目追加进按天分组的清单，网页能展示多日趋势，
+      而不是只看今天一条。
+    """
+    import json as _json
+
+    out_dir = Path(ROOT) / "web"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_file = out_dir / "data.json"
+
+    # 读取既有历史，避免每次运行把旧数据冲掉
+    history: list[dict] = []
+    if out_file.exists():
+        try:
+            history = _json.loads(out_file.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            history = []
+
+    now = datetime.now(timezone.utc)
+    today = now.strftime("%Y-%m-%d")
+
+    # 去掉当日旧快照，用本轮最新结果覆盖，避免同一天多次跑产生重复
+    history = [h for h in history if h.get("date") != today]
+
+    entries = []
+    for v in items:
+        entries.append({
+            "cve": v.get("cve") or v.get("key", ""),
+            "level": v.get("level", ""),
+            "cvss": round(v.get("cvss", 0.0), 1),
+            "cvss_exact": bool(v.get("cvss_exact")),
+            "kev": bool(v.get("kev")),
+            "epss": round(v.get("epss", 0.0), 4),
+            "ransomware": v.get("ransomware", ""),
+            "impact": v.get("impact", ""),
+            "attack_cond": v.get("attack_cond", ""),
+            "affected_range": v.get("affected_range", ""),
+            "asset_version": v.get("asset_version", ""),
+            "component": _component_name(v),
+            "title": (v.get("title") or "")[:160],
+            "cisa_action": v.get("cisa_action", ""),
+            "url": v.get("url", ""),
+            "sources": v.get("sources", []),
+            "exact_match": bool(v.get("exact_match")),
+            "published": v.get("published", ""),
+        })
+
+    history.append({
+        "date": today,
+        "generated_at": now.isoformat(),
+        "scanned": stats.get("scanned", 0),
+        "hit": len(entries),
+        "p0": sum(1 for e in entries if e["level"] == "P0"),
+        "p1": sum(1 for e in entries if e["level"] == "P1"),
+        "p2": sum(1 for e in entries if e["level"] == "P2"),
+        "sources": stats.get("sources", []),
+        "degraded": stats.get("degraded", []),
+        "entries": entries,
+    })
+
+    # 只保留最近 30 天的历史，避免 JSON 无限膨胀
+    history = history[-30:]
+
+    out_file.write_text(
+        _json.dumps(history, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    log(f"网页数据已写入 web/data.json（{len(entries)} 条，累计 {len(history)} 天）")
+
+
 def split_by_bytes(text: str, max_bytes: int) -> list[str]:
-    """企微 markdown 超过 2048 字节会被静默截断，这里按行切分保证完整送达。"""
     chunks, cur = [], ""
     for line in text.split("\n"):
         candidate = f"{cur}\n{line}" if cur else line
@@ -1132,6 +1207,11 @@ def main() -> int:
         return 0
 
     text = render_markdown(items, stats) if items else render_degraded(stats)
+
+    # 网页数据：把命中条目 + 统计导出为 JSON，供 web/ 前端读取展示。
+    # 纯只读旁路，不影响推送与 state.db 水位。dry-run 也照写，便于本机预览。
+    write_web_data(items, stats, cfg)
+
     if args.dry_run:
         print("\n" + "=" * 60)
         print(text)

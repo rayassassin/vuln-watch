@@ -1,0 +1,448 @@
+<!DOCTYPE html>
+<html lang="zh-CN" class="dark">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>漏洞情报全景 · Vuln Watch</title>
+<style>
+  :root {
+    --background: #0a192f;
+    --card: #1e293b;
+    --card-hover: #233449;
+    --border: #334155;
+    --foreground: #fff;
+    --muted: #94a3b8;
+    --muted-fg: #64748b;
+    --accent: #64ffda;
+    --accent-fg: #0a192f;
+    --critical: #dc2626;
+    --high: #f97316;
+    --medium: #facc15;
+    --medium-text: #ca8a04;
+    --low: #3b82f6;
+    --info: #64748b;
+    --success: #16a34a;
+    --radius: 12px;
+    --radius-sm: 8px;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  html { scroll-behavior: smooth; }
+
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+                 "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+    background: var(--background);
+    color: var(--foreground);
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+    min-height: 100vh;
+    overflow-x: hidden;
+  }
+
+  /* 背景光晕 */
+  body::before {
+    content: "";
+    position: fixed;
+    inset: 0;
+    background:
+      radial-gradient(800px 400px at 15% -10%, rgba(100, 255, 218, 0.08), transparent 60%),
+      radial-gradient(700px 500px at 90% 0%, rgba(59, 130, 246, 0.10), transparent 55%);
+    pointer-events: none;
+    z-index: 0;
+  }
+
+  a { color: inherit; text-decoration: none; }
+
+  .wrap { position: relative; z-index: 1; max-width: 1120px; margin: 0 auto; padding: 0 24px; }
+
+  /* ===== 导航 ===== */
+  header {
+    position: sticky; top: 0; z-index: 50;
+    backdrop-filter: blur(12px);
+    background: rgba(10, 25, 47, 0.78);
+    border-bottom: 1px solid var(--border);
+  }
+  .nav {
+    display: flex; align-items: center; justify-content: space-between;
+    height: 64px;
+  }
+  .logo {
+    display: flex; align-items: center; gap: 10px;
+    font-weight: 700; font-size: 18px; letter-spacing: 0.5px;
+  }
+  .logo .dot {
+    width: 10px; height: 10px; border-radius: 50%;
+    background: var(--accent);
+    box-shadow: 0 0 12px var(--accent);
+  }
+  .nav-links { display: flex; gap: 28px; align-items: center; }
+  .nav-links a { color: var(--muted); font-size: 14px; transition: color .15s; }
+  .nav-links a:hover { color: var(--foreground); }
+  .nav-links a.active { color: var(--accent); }
+  .live-pill {
+    display: inline-flex; align-items: center; gap: 6px;
+    font-size: 12px; color: var(--accent);
+    border: 1px solid rgba(100,255,218,0.4);
+    border-radius: 999px; padding: 4px 12px;
+    background: rgba(100,255,218,0.06);
+  }
+  .live-pill .pulse {
+    width: 7px; height: 7px; border-radius: 50%; background: var(--accent);
+    animation: pulse 1.6s infinite;
+  }
+  @keyframes pulse {
+    0% { box-shadow: 0 0 0 0 rgba(100,255,218,0.6); }
+    70% { box-shadow: 0 0 0 7px rgba(100,255,218,0); }
+    100% { box-shadow: 0 0 0 0 rgba(100,255,218,0); }
+  }
+
+  /* ===== Hero ===== */
+  .hero { padding: 72px 0 40px; text-align: center; }
+  .hero .eyebrow {
+    font-size: 13px; color: var(--accent); letter-spacing: 2px;
+    text-transform: uppercase; margin-bottom: 16px;
+  }
+  .hero h1 {
+    font-size: clamp(34px, 5vw, 54px);
+    font-weight: 800; letter-spacing: -1px; line-height: 1.15;
+    background: linear-gradient(135deg, #fff 20%, #94a3b8 60%, #64ffda 100%);
+    -webkit-background-clip: text; background-clip: text;
+    -webkit-text-fill-color: transparent;
+  }
+  .hero p.sub {
+    margin: 20px auto 0; max-width: 620px; color: var(--muted); font-size: 16px;
+  }
+  .hero .cta { margin-top: 32px; display: flex; gap: 16px; justify-content: center; }
+  .btn {
+    display: inline-flex; align-items: center; gap: 8px;
+    padding: 12px 24px; border-radius: 10px; font-size: 15px; font-weight: 600;
+    border: 1px solid transparent; cursor: pointer; transition: all .15s;
+  }
+  .btn-primary { background: var(--accent); color: var(--accent-fg); }
+  .btn-primary:hover { box-shadow: 0 0 24px rgba(100,255,218,0.4); transform: translateY(-1px); }
+  .btn-ghost { border-color: var(--border); color: var(--muted); background: transparent; }
+  .btn-ghost:hover { border-color: var(--accent); color: var(--accent); }
+
+  /* ===== 统计条 ===== */
+  .stats {
+    display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px;
+    margin: 24px 0 56px;
+  }
+  .stat {
+    background: var(--card); border: 1px solid var(--border);
+    border-radius: var(--radius); padding: 22px 20px;
+    transition: border-color .15s, transform .15s;
+  }
+  .stat:hover { border-color: rgba(100,255,218,0.4); transform: translateY(-2px); }
+  .stat .num {
+    font-size: 36px; font-weight: 800; line-height: 1;
+    font-variant-numeric: tabular-nums;
+  }
+  .stat .num.accent { color: var(--accent); }
+  .stat .num.critical { color: var(--critical); }
+  .stat .num.high { color: var(--high); }
+  .stat .num.medium { color: var(--medium); }
+  .stat .label { margin-top: 10px; color: var(--muted); font-size: 13px; }
+  .stat .sub { margin-top: 2px; color: var(--muted-fg); font-size: 12px; }
+
+  /* ===== 区块 ===== */
+  .section { margin-bottom: 56px; }
+  .section-head {
+    display: flex; align-items: flex-end; justify-content: space-between;
+    margin-bottom: 20px;
+  }
+  .section-head h2 { font-size: 24px; font-weight: 700; letter-spacing: -0.5px; }
+  .section-head .desc { margin-top: 6px; color: var(--muted); font-size: 14px; }
+  .section-head .more { color: var(--accent); font-size: 14px; }
+
+  /* ===== 漏洞卡片 ===== */
+  .vuln-grid { display: grid; grid-template-columns: 1fr; gap: 14px; }
+  .vuln-card {
+    background: var(--card); border: 1px solid var(--border);
+    border-radius: var(--radius); padding: 20px 22px;
+    transition: border-color .15s, transform .15s, background .15s;
+    cursor: pointer;
+  }
+  .vuln-card:hover { background: var(--card-hover); border-color: rgba(100,255,218,0.35); transform: translateY(-2px); }
+  .vuln-card .top { display: flex; align-items: flex-start; gap: 14px; }
+  .level-badge {
+    flex-shrink: 0; width: 40px; height: 40px; border-radius: 10px;
+    display: flex; align-items: center; justify-content: center;
+    font-weight: 800; font-size: 15px; color: #0a192f;
+  }
+  .level-badge.P0 { background: var(--critical); color: #fff; }
+  .level-badge.P1 { background: var(--high); color: #1a0d00; }
+  .level-badge.P2 { background: var(--medium); color: #1a1400; }
+
+  .vuln-main { flex: 1; min-width: 0; }
+  .vuln-title { font-size: 17px; font-weight: 700; line-height: 1.4; }
+  .vuln-title .cve { color: var(--accent); font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 15px; }
+  .vuln-title .comp { color: var(--muted); font-weight: 500; }
+  .vuln-meta { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+  .tag {
+    display: inline-flex; align-items: center; gap: 4px;
+    font-size: 12px; padding: 3px 10px; border-radius: 999px;
+    border: 1px solid var(--border); color: var(--muted);
+  }
+  .tag.cvss { color: var(--foreground); font-weight: 600; font-family: ui-monospace, Menlo, monospace; }
+  .tag.kev { color: #fca5a5; border-color: rgba(220,38,38,0.5); background: rgba(220,38,38,0.12); }
+  .tag.epss { color: var(--accent); border-color: rgba(100,255,218,0.4); background: rgba(100,255,218,0.08); }
+  .tag.ransom { color: #fca5a5; border-color: rgba(220,38,38,0.5); background: rgba(220,38,38,0.12); }
+  .tag.match { color: #86efac; border-color: rgba(22,163,74,0.4); background: rgba(22,163,74,0.10); }
+
+  .vuln-body { margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--border); }
+  .kv { display: flex; gap: 10px; margin-bottom: 8px; font-size: 14px; }
+  .kv:last-child { margin-bottom: 0; }
+  .kv .k { flex-shrink: 0; width: 52px; color: var(--muted-fg); font-size: 13px; padding-top: 1px; }
+  .kv .v { color: #cbd5e1; }
+
+  /* ===== 数据源状态条 ===== */
+  .sources-bar {
+    display: flex; flex-wrap: wrap; gap: 8px; align-items: center;
+    margin-bottom: 8px; font-size: 13px; color: var(--muted);
+  }
+  .src-chip {
+    padding: 3px 10px; border-radius: 6px; font-size: 12px;
+    background: rgba(100,255,218,0.08); color: var(--accent);
+    border: 1px solid rgba(100,255,218,0.25);
+  }
+  .warn-bar {
+    display: flex; align-items: flex-start; gap: 8px;
+    background: rgba(250,204,21,0.08); border: 1px solid rgba(250,204,21,0.35);
+    color: #fde68a; border-radius: var(--radius-sm); padding: 12px 16px;
+    font-size: 13px; margin-bottom: 20px;
+  }
+
+  /* ===== 趋势图 ===== */
+  .chart-box {
+    background: var(--card); border: 1px solid var(--border);
+    border-radius: var(--radius); padding: 24px;
+  }
+  .chart-box .chart-title { font-size: 15px; font-weight: 600; margin-bottom: 16px; }
+  .bars { display: flex; align-items: flex-end; gap: 12px; height: 180px; }
+  .bar-col { flex: 1; display: flex; flex-direction: column; align-items: center; gap: 6px; height: 100%; justify-content: flex-end; }
+  .bar-stack { display: flex; flex-direction: column-reverse; gap: 2px; width: 100%; align-items: center; }
+  .bar-seg { width: 100%; border-radius: 4px 4px 0 0; min-height: 2px; }
+  .bar-seg.P0 { background: var(--critical); }
+  .bar-seg.P1 { background: var(--high); }
+  .bar-seg.P2 { background: var(--medium); }
+  .bar-label { font-size: 11px; color: var(--muted-fg); white-space: nowrap; }
+
+  /* ===== 空态 ===== */
+  .empty {
+    text-align: center; padding: 80px 20px; color: var(--muted);
+  }
+  .empty .big { font-size: 48px; margin-bottom: 16px; }
+
+  footer {
+    border-top: 1px solid var(--border); padding: 40px 0;
+    color: var(--muted-fg); font-size: 13px; text-align: center;
+  }
+  footer .accent { color: var(--accent); }
+
+  @media (max-width: 720px) {
+    .stats { grid-template-columns: repeat(2, 1fr); }
+    .nav-links { display: none; }
+    .hero { padding: 48px 0 28px; }
+  }
+</style>
+</head>
+<body>
+  <header>
+    <div class="wrap nav">
+      <div class="logo"><span class="dot"></span>漏洞情报全景<span style="color:var(--muted-fg);font-weight:400;font-size:13px;margin-left:4px;">Vuln Watch</span></div>
+      <nav class="nav-links">
+        <a href="#overview" class="active">总览</a>
+        <a href="#latest">最新漏洞</a>
+        <a href="#trend">趋势</a>
+      </nav>
+      <span class="live-pill"><span class="pulse"></span>实时更新</span>
+    </div>
+  </header>
+
+  <div class="wrap">
+    <section class="hero">
+      <div class="eyebrow">看见攻击者的下一步</div>
+      <h1>为企业安全运营团队提供<br>实时、准确、可操作的漏洞情报</h1>
+      <p class="sub">多源聚合 NVD / OSV / CISA KEV / EPSS / GitHub Advisory / Packagist，
+        按自有组件精确匹配，分级推送，只把真正要处理的漏洞摆到你面前。</p>
+      <div class="cta">
+        <a class="btn btn-primary" href="#latest">查看最新漏洞</a>
+        <a class="btn btn-ghost" href="#trend">浏览趋势</a>
+      </div>
+    </section>
+
+    <section id="overview" class="section">
+      <div class="stats" id="stats"></div>
+      <div id="degraded-box"></div>
+    </section>
+
+    <section id="latest" class="section">
+      <div class="section-head">
+        <div>
+          <h2>最新热点漏洞</h2>
+          <div class="desc">全球正在发生的攻击 · 实时追踪安全态势</div>
+        </div>
+        <span class="more" id="range-label"></span>
+      </div>
+      <div id="vuln-list"></div>
+    </section>
+
+    <section id="trend" class="section">
+      <div class="section-head">
+        <div>
+          <h2>命中趋势</h2>
+          <div class="desc">近 30 天各分级命中数量</div>
+        </div>
+      </div>
+      <div class="chart-box">
+        <div class="chart-title">每日命中（P0 / P1 / P2）</div>
+        <div class="bars" id="bars"></div>
+      </div>
+    </section>
+  </div>
+
+  <footer>
+    <div class="wrap">
+      由 <span class="accent">vuln-watch</span> 自动采集生成 ·
+      数据源：NVD · OSV · CISA KEV · FIRST EPSS · GitHub Advisory · Packagist
+    </div>
+  </footer>
+
+<script>
+const LEVEL_TEXT = { P0: "立即处置", P1: "本周处置", P2: "观察列表" };
+const $ = (s) => document.querySelector(s);
+
+function fmtDate(iso) {
+  if (!iso) return "";
+  const d = new Date(iso);
+  return `${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;
+}
+
+function esc(s) {
+  return (s || "").replace(/[&<>"']/g, c => ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;" }[c]));
+}
+
+function tag(text, cls) {
+  return `<span class="tag ${cls}">${esc(text)}</span>`;
+}
+
+function renderCard(e) {
+  const badges = [];
+  if (e.kev) badges.push(tag("已进 KEV · 在野利用", "kev"));
+  if (e.ransomware === "Known") badges.push(tag("勒索软件在用", "ransom"));
+  if (e.exact_match) badges.push(tag("命中自有组件", "match"));
+  if (e.epss > 0) badges.push(tag(`EPSS ${(e.epss*100).toFixed(0)}%`, "epss"));
+
+  const cvss = tag(`CVSS${e.cvss_exact ? "" : "≈"}${e.cvss.toFixed(1)}`, "cvss");
+  const meta = [cvss, ...badges].join("");
+
+  const rows = [];
+  if (e.impact) rows.push(`<div class="kv"><span class="k">影响</span><span class="v">${esc(e.impact)}</span></div>`);
+  if (e.attack_cond) rows.push(`<div class="kv"><span class="k">条件</span><span class="v">${esc(e.attack_cond)}</span></div>`);
+  if (e.affected_range) rows.push(`<div class="kv"><span class="k">范围</span><span class="v">${esc(e.affected_range)}</span></div>`);
+  else if (e.asset_version && e.asset_version !== "未指定") rows.push(`<div class="kv"><span class="k">版本</span><span class="v">${esc(e.asset_version)}</span></div>`);
+
+  const comp = e.component ? ` <span class="comp">· ${esc(e.component)}</span>` : "";
+  const title = e.title ? ` — ${esc(e.title)}` : "";
+
+  return `
+    <div class="vuln-card" onclick="window.open('${esc(e.url)}','_blank')">
+      <div class="top">
+        <div class="level-badge ${e.level}">${e.level}</div>
+        <div class="vuln-main">
+          <div class="vuln-title"><span class="cve">${esc(e.cve)}</span>${comp}${title}</div>
+          <div class="vuln-meta">${meta}</div>
+        </div>
+      </div>
+      <div class="vuln-body">${rows.join("")}</div>
+    </div>`;
+}
+
+async function load() {
+  try {
+    const resp = await fetch("data.json", { cache: "no-store" });
+    if (!resp.ok) throw new Error("HTTP " + resp.status);
+    const history = await resp.json();
+    render(history);
+  } catch (err) {
+    document.getElementById("vuln-list").innerHTML =
+      `<div class="empty"><div class="big">📡</div>暂无数据<br><span style="font-size:13px">请先运行 collect.py 生成 data.json</span></div>`;
+    document.getElementById("stats").innerHTML = "";
+    document.getElementById("bars").innerHTML = "";
+    console.error("加载 data.json 失败：", err);
+  }
+}
+
+function render(history) {
+  if (!Array.isArray(history) || history.length === 0) return;
+
+  const latest = history[history.length - 1];
+  const entries = latest.entries || [];
+
+  // 统计条
+  const totalHit = history.reduce((s, d) => s + (d.hit || 0), 0);
+  const totalP0 = history.reduce((s, d) => s + (d.p0 || 0), 0);
+  const totalP1 = history.reduce((s, d) => s + (d.p1 || 0), 0);
+  const totalP2 = history.reduce((s, d) => s + (d.p2 || 0), 0);
+
+  document.getElementById("stats").innerHTML = `
+    <div class="stat"><div class="num accent">${latest.hit ?? 0}</div><div class="label">今日新增</div><div class="sub">采集 ${latest.scanned ?? 0} 条</div></div>
+    <div class="stat"><div class="num critical">${latest.p0 ?? 0}</div><div class="label">立即处置 P0</div><div class="sub">在野利用 / 致命</div></div>
+    <div class="stat"><div class="num high">${latest.p1 ?? 0}</div><div class="label">本周处置 P1</div><div class="sub">命中组件 / 高危</div></div>
+    <div class="stat"><div class="num medium">${latest.p2 ?? 0}</div><div class="label">观察列表 P2</div><div class="sub">累计 ${totalHit} 条命中</div></div>`;
+
+  // 数据源状态
+  const deg = latest.degraded || [];
+  let degHtml = "";
+  if (deg.length) {
+    degHtml = `<div class="warn-bar">⚠️ ${deg.map(esc).join("；")}。结果可能不完整，请检查数据源。</div>`;
+  }
+  const srcChips = (latest.sources || []).map(s => `<span class="src-chip">${esc(s)}</span>`).join("");
+  document.getElementById("degraded-box").innerHTML = degHtml +
+    (srcChips ? `<div class="sources-bar">数据源 ${srcChips}</div>` : "");
+
+  // 时间区间
+  const since = latest.generated_at ? fmtDate(latest.generated_at) : "";
+  document.getElementById("range-label").textContent =
+    latest.date ? `更新于 ${latest.date}` : "";
+
+  // 漏洞列表
+  const listEl = document.getElementById("vuln-list");
+  if (entries.length === 0) {
+    listEl.innerHTML = `<div class="empty"><div class="big">🛡️</div>今日无新增高危漏洞<br><span style="font-size:13px">保持关注，数据源每 24h 更新</span></div>`;
+  } else {
+    listEl.innerHTML = entries.map(renderCard).join("");
+  }
+
+  // 趋势图（近 14 天）
+  renderTrend(history.slice(-14));
+}
+
+function renderTrend(days) {
+  const barsEl = document.getElementById("bars");
+  const maxTotal = Math.max(1, ...days.map(d => (d.p0||0)+(d.p1||0)+(d.p2||0)));
+  const maxSegHeight = 150;
+  barsEl.innerHTML = days.map(d => {
+    const total = (d.p0||0)+(d.p1||0)+(d.p2||0);
+    const segs = [];
+    for (const [lv, n] of [["P0", d.p0||0], ["P1", d.p1||0], ["P2", d.p2||0]]) {
+      if (n > 0) {
+        const h = Math.max(3, Math.round(n / maxTotal * maxSegHeight));
+        segs.push(`<div class="bar-seg ${lv}" style="height:${h}px" title="${lv} × ${n}"></div>`);
+      }
+    }
+    return `
+      <div class="bar-col">
+        <div class="bar-stack">${segs.join("")}</div>
+        <div class="bar-label">${fmtDate(d.date)}</div>
+      </div>`;
+  }).join("");
+}
+
+load();
+</script>
+</body>
+</html>
