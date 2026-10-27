@@ -24,7 +24,7 @@ python collect.py --days 1 --no-commit
 python collect.py --via cli        # cli | webhook | both
 ```
 
-已配置定时任务：**每天 18:00** 自动执行并推送日报。推送目标由脚本自动从 `wecom-cli identity whoami` 解析当前授权人，不需要把会话 ID 写进配置。
+生产环境跑在云服务器，每天 18:00 由系统 cron 触发；本机只做开发与同步（见下面「部署到云服务器」）。
 
 可选环境变量：
 
@@ -118,6 +118,40 @@ python collect.py --via cli        # cli | webhook | both
 
 **5. 企微 2048 字节限制。**
 `split_by_bytes()` 按行切分，`max_bytes` 默认 6000。注意两个限制不是一回事：CLI 通道单条上限 20480 字节，群机器人 webhook 才是 2048。
+
+## 部署到云服务器
+
+生产跑在一台Linux 服务器上，目录 `/opt/vuln-watch`。
+
+```bash
+# 本机改完代码、提交后，一条命令同步
+python3 scripts/deploy.py
+```
+
+同步逻辑：`git archive` 只打包已跟踪文件 → 上传到中转目录 → 解包到 `/opt/vuln-watch`
+→ 写 `.version`（当前 commit sha）→ 重新生成 `run.sh`。
+**服务器上的 `state.db`、`.env`、`logs/` 一律不动**，所以同步不会把已推送水位冲掉。
+
+服务器侧文件：
+
+| 文件 | 作用 |
+|---|---|
+| `run.sh` | 启动包装，固定 `WECOM_CHANNEL=app`，收件人从既有 `feeds.json` 取 |
+| `scripts/cron-run.sh` | cron 入口：落日志 + 失败告警 |
+| `logs/cron-YYYYMMDD.log` | 每天的运行日志 |
+| `.version` | 当前部署的 commit |
+
+定时任务（服务器 crontab）：
+
+```
+0 18 * * * /opt/vuln-watch/scripts/cron-run.sh
+```
+
+**为什么必须在服务器上跑**：自建应用配了可信 IP 白名单，本机出口 IP 调 `message/send`
+会被拒（`errcode 60020`）。服务器在名单内，本机不在。本机想直发只能走 `channel: cli`（wecom-cli）。
+
+**失败一定告警**：`cron-run.sh` 捕获非 0 退出码，通过同一应用通道发「🔴 漏洞日报推送失败」
+并附日志最后几行；告警本身失败也会在日志里留一行，不留静默黑洞。
 
 ## 凭证与配置安全
 
