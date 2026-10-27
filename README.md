@@ -119,6 +119,35 @@ python collect.py --via cli        # cli | webhook | both
 **5. 企微 2048 字节限制。**
 `split_by_bytes()` 按行切分，`max_bytes` 默认 6000。注意两个限制不是一回事：CLI 通道单条上限 20480 字节，群机器人 webhook 才是 2048。
 
+## 凭证与配置安全
+
+**这个仓库不放任何凭证。** 所有密钥一律走环境变量，配置里只写变量名：
+
+| 需要的东西 | 放哪 | 仓库里的写法 |
+|---|---|---|
+| NVD API Key | 环境变量 `NVD_API_KEY` | `api_key_env: NVD_API_KEY` |
+| GitHub Token | 环境变量 `GITHUB_TOKEN` | 代码里 `os.environ.get(...)` |
+| 企微群机器人地址 | 环境变量 `WECOM_VULN_WEBHOOK` | `webhook_env: WECOM_VULN_WEBHOOK` |
+| 推送目标会话 | 运行时从授权身份解析 | `chat_id: ""`（保持空） |
+
+`state.db` 不入库：它记录「哪些漏洞已经推过」。多台机器共用同一份水位会让漏报变常态。
+
+**双重拦截**：
+
+```bash
+# 每个 clone 执行一次，启用提交前检查
+git config core.hooksPath .githooks
+```
+
+- 本地：`.githooks/pre-commit` 扫暂存区，命中即阻止提交
+- 远端：暂未启用。GitHub Actions 的工作流文件需要 token 具备 `workflow` 权限，
+  当前账号只有 `repo`，推送带 workflow 的提交会被拒。要开的话先执行
+  `gh auth refresh -s workflow`，再补一个 `python scripts/check_secrets.py` 的 job。
+
+扫描规则在 `scripts/check_secrets.py`，覆盖 GitHub token、企微 webhook key / 会话 ID、硬编码密码、请求头明文凭证、私钥块、公网 IP、含用户名的本机路径。误报就把特征加进 `ALLOW_PATTERNS`，**不要关规则**。
+
+即使钩子被 `--no-verify` 绕过，`python scripts/check_secrets.py` 仍是推送前的最后一道人工闸门。
+
 ## 日常维护
 
 只改 `vuln-watch.yaml` 里的两块：

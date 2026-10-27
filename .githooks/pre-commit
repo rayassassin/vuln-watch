@@ -1,0 +1,12 @@
+#!/bin/sh
+# 提交前扫描暂存区，发现疑似凭证直接拦下。
+# 启用方式（每个 clone 执行一次）：git config core.hooksPath .githooks
+# 应急跳过：git commit --no-verify（跳过后 CI 仍会拦，别指望绕过）
+
+PY="${PYTHON:-python3}"
+if ! command -v "$PY" >/dev/null 2>&1; then
+    echo "⚠️  未找到 $PY，跳过敏感信息扫描" >&2
+    exit 0
+fi
+
+exec "$PY" scripts/check_secrets.py --staged
