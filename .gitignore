@@ -1,0 +1,20 @@
+# 运行状态：记录已推送水位，每台机器各自一份，不要提交
+state.db
+state.db-journal
+state.db-wal
+
+# 运行日志
+*.log
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.env
+
+# macOS
+.DS_Store
+
+# 本地覆盖配置（放自己的 webhook / chat_id，不入库）
+vuln-watch.local.yaml

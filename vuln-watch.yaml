@@ -1,0 +1,107 @@
+# ============================================================
+# vuln-watch 配置
+# 你日常只需要维护 assets（组件清单）和 cnas（厂商订阅）两块
+# ============================================================
+
+# ---------- 1. NVD：按 CNA 订阅厂商全家桶 ----------
+# CNA = CVE Numbering Authority。厂商自己就是 CNA 时，
+# 用 sourceIdentifier 一个参数就能拿到它所有产品线的 CVE，
+# 不用逐个去翻厂商公告页。
+# 完整 CNA 名单：https://www.cve.org/PartnerInformation/ListofPartners
+nvd:
+  api_key_env: NVD_API_KEY      # 可选。有 key 50 req/30s，无 key 5 req/30s
+  lookback_days: 3              # 首次回看天数，之后按 state 增量
+  cnas:
+    - security@apache.org       # Apache 全家桶：Tomcat / Struts / Kafka / ActiveMQ
+                                #   Pulsar / Solr / Airflow / httpd / Shiro / Dubbo
+    - security@php.net          # PHP 解释器本体
+    - secalert_us@oracle.com    # Oracle 全家桶：JDK / WebLogic / MySQL
+
+# ---------- 2. OSV：按组件坐标 + 版本精确匹配 ----------
+# 这是"命中你的资产"最准的方式。ecosystem 可选 Maven / Packagist /
+# npm / PyPI / Go / crates.io / NuGet。
+# 不写 version 时会拉该包全量漏洞再按 lookback 过滤，噪声较大，建议尽量填版本。
+osv:
+  lookback_days: 7
+  assets:
+    # ---- Java / Spring 技术栈 ----
+    - { eco: Maven, name: "org.apache.tomcat:tomcat-catalina",          version: "9.0.80", match: [tomcat] }
+    - { eco: Maven, name: "org.apache.tomcat.embed:tomcat-embed-core",  version: "",       match: [tomcat] }
+    - { eco: Maven, name: "org.springframework:spring-core",            version: "5.3.31", match: [spring] }
+    - { eco: Maven, name: "org.springframework:spring-webmvc",          version: "5.3.31", match: [spring] }
+    - { eco: Maven, name: "org.springframework.boot:spring-boot",       version: "",       match: [spring-boot] }
+    - { eco: Maven, name: "org.springframework.security:spring-security-web", version: "",  match: [spring-security] }
+    - { eco: Maven, name: "org.apache.logging.log4j:log4j-core",        version: "2.17.1", match: [log4j] }
+    - { eco: Maven, name: "ch.qos.logback:logback-classic",             version: "",       match: [logback] }
+    - { eco: Maven, name: "com.alibaba:fastjson",                       version: "",       match: [fastjson] }
+    - { eco: Maven, name: "com.fasterxml.jackson.core:jackson-databind", version: "",      match: [jackson] }
+    - { eco: Maven, name: "org.apache.shiro:shiro-core",                version: "",       match: [shiro] }
+    - { eco: Maven, name: "org.apache.struts:struts2-core",             version: "",       match: [struts] }
+    - { eco: Maven, name: "org.mybatis:mybatis",                        version: "",       match: [mybatis] }
+    - { eco: Maven, name: "org.apache.dubbo:dubbo",                     version: "",       match: [dubbo] }
+    - { eco: Maven, name: "cn.hutool:hutool-all",                       version: "",       match: [hutool] }
+    - { eco: Maven, name: "com.mysql:mysql-connector-j",                version: "",       match: [mysql-connector] }
+
+    # ---- PHP 技术栈 ----
+    - { eco: Packagist, name: "laravel/framework",     version: "", match: [laravel] }
+    - { eco: Packagist, name: "symfony/http-kernel",   version: "", match: [symfony] }
+    - { eco: Packagist, name: "guzzlehttp/guzzle",     version: "", match: [guzzle] }
+    - { eco: Packagist, name: "monolog/monolog",       version: "", match: [monolog] }
+    - { eco: Packagist, name: "topthink/framework",    version: "", match: [thinkphp] }
+    - { eco: Packagist, name: "phpmailer/phpmailer",   version: "", match: [phpmailer] }
+
+# ---------- 3. 中间件 / 服务器的纯文本监控 ----------
+# 这类东西不是语言包，OSV 覆盖不到，走 NVD 关键词 + KEV 兜底。
+# 官方公告页没有 JSON 的（Tomcat、nginx）只能爬，这里用 NVD 代替，更省心。
+keyword_watch:
+  - tomcat
+  - nginx
+  - httpd
+  - openssl
+  - openssh
+  - redis
+  - elasticsearch
+  - rabbitmq
+  - kafka
+  - zookeeper
+  - jenkins
+  - gitlab
+  - docker
+  - kubernetes
+  - weblogic
+
+# 排除词。关键词匹配的天花板就在这里：
+# 比如 "Redis Lua HEAP overflow ... in Apache Kvrocks" 会因为含 redis 被误捞，
+# 但你其实没用 Kvrocks。把这类串台词写进来，命中即丢弃。
+keyword_exclude:
+  - kvrocks
+  - iotdb
+  - dolphinscheduler
+  - seatunnel
+
+# ---------- 4. 外部 feed（直连，无需 key） ----------
+feeds:
+  cisa_kev: "https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json"
+  epss_api: "https://api.first.org/data/v1/epss"
+  github_advisories: "https://api.github.com/advisories"
+  packagist_api: "https://packagist.org/api/security-advisories/"
+
+# ---------- 5. 分级与推送策略 ----------
+policy:
+  min_cvss: 7.0            # 低于这个分且没被在野利用的，丢弃
+  epss_threshold: 0.1      # EPSS 高于此值升级为 P1
+  always_push_kev: true    # 进了 CISA KEV 无条件 P0
+  always_push_cvss: 9.0    # CVSS 达到此值才具备 P0 资格（仍需在野利用证据或命中自有组件）
+  # 分级配额，防止一次推送几十条把人劝退
+  quota:
+    P0: 10
+    P1: 10
+    P2: 6
+
+wecom:
+  channel: cli              # cli（走已授权的企业微信机器人，推荐）| webhook | both
+  chat_id: ""               # 留空则自动取当前授权人身份发给自己
+  chat_id_env: WECOM_CHAT_ID
+  webhook_env: WECOM_VULN_WEBHOOK   # 仅 channel=webhook 时需要
+  # 注意区分两个限制：CLI 通道单条 20480 字节，群机器人 webhook 才是 2048
+  max_bytes: 6000
