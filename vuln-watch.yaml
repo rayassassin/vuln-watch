@@ -99,9 +99,21 @@ policy:
     P2: 6
 
 wecom:
-  channel: cli              # cli（走已授权的企业微信机器人，推荐）| webhook | both
+  # cli      —— 走已授权的 wecom-cli 机器人（本机用）
+  # app      —— 走自建应用 message/send（服务器用，不需要 wecom-cli）
+  # webhook  —— 群机器人地址
+  # both     —— 同时发
+  # 可被环境变量 WECOM_CHANNEL 覆盖，这样两台机器共用同一份配置不用改文件
+  channel: cli
   chat_id: ""               # 留空则自动取当前授权人身份发给自己
   chat_id_env: WECOM_CHAT_ID
   webhook_env: WECOM_VULN_WEBHOOK   # 仅 channel=webhook 时需要
-  # 注意区分两个限制：CLI 通道单条 20480 字节，群机器人 webhook 才是 2048
+  # 自建应用通道：凭据从环境变量或该文件读，绝不写进本文件
+  # 服务器上由 /opt/vuln-watch/.env 注入 WECOM_APP_ENV 指向凭据文件
+  app_env_file: ""
+  app_env_file_env: WECOM_APP_ENV
+  touser: ""                # 留空则用 WX_TOUSER 环境变量，再退化为自动解析授权人
+  touser_env: WX_TOUSER
+  app_max_bytes: 1800       # 应用消息 markdown 硬上限 2048 字节，留余量
+  # 注意区分三个限制：CLI 通道单条 20480 字节，自建应用 2048，群机器人 webhook 也是 2048
   max_bytes: 6000

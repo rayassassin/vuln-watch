@@ -863,14 +863,108 @@ def push_wecom_cli(text: str, cfg: dict) -> bool:
     return ok
 
 
+def _load_app_creds(cfg: dict) -> dict:
+    """
+    企业微信自建应用凭据。优先级：环境变量 > 0600 的 env 文件。
+    凭证永远不进配置文件、不进仓库，这是硬约束。
+    """
+    keys = ("WX_CORPID", "WX_SECRET", "WX_AGENTID")
+    creds = {k: os.environ.get(k, "").strip() for k in keys}
+    if all(creds.values()):
+        return creds
+
+    env_file = (
+        os.environ.get(cfg["wecom"].get("app_env_file_env", "WECOM_APP_ENV"), "").strip()
+        or str(cfg["wecom"].get("app_env_file") or "").strip()
+    )
+    if env_file:
+        p = Path(env_file).expanduser()
+        if p.exists():
+            for line in p.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                k, v = line.split("=", 1)
+                if k.strip() in keys and not creds.get(k.strip()):
+                    creds[k.strip()] = v.strip()
+        else:
+            log(f"  ! 应用凭据文件不存在：{p}")
+    return creds
+
+
+def _app_access_token(corpid: str, secret: str) -> str:
+    resp = requests.get(
+        "https://qyapi.weixin.qq.com/cgi-bin/gettoken",
+        params={"corpid": corpid, "corpsecret": secret}, timeout=15,
+    )
+    body = resp.json()
+    if body.get("errcode"):
+        raise RuntimeError(f"errcode={body.get('errcode')} {body.get('errmsg')}")
+    return body["access_token"]
+
+
+def push_wecom_app(text: str, cfg: dict) -> bool:
+    """
+    走企业微信自建应用 message/send。服务器上没有 wecom-cli，这条通道才是主力。
+    注意：应用若配置了可信 IP 白名单，未授权 IP 调用会报 60020，此时只能在该 IP 的机器上发。
+    """
+    creds = _load_app_creds(cfg)
+    missing = [k for k in ("WX_CORPID", "WX_SECRET", "WX_AGENTID") if not creds.get(k)]
+    if missing:
+        log(f"! 自建应用凭据缺失：{','.join(missing)}，跳过推送")
+        return False
+
+    touser = (
+        os.environ.get(cfg["wecom"].get("touser_env", "WX_TOUSER"), "").strip()
+        or str(cfg["wecom"].get("touser") or "").strip()
+        or _resolve_chat_id(cfg)
+    )
+    if not touser:
+        log("! 未能确定应用消息收件人（设置环境变量 WX_TOUSER 或配置 wecom.touser）")
+        return False
+
+    try:
+        token = _app_access_token(creds["WX_CORPID"], creds["WX_SECRET"])
+    except Exception as exc:  # noqa: BLE001
+        log(f"! 获取 access_token 失败：{exc}")
+        return False
+
+    # 应用消息 markdown 上限 2048 字节，实际按 1800 切，留出多段续标的空间
+    limit = min(int(cfg["wecom"]["max_bytes"]), int(cfg["wecom"].get("app_max_bytes", 1800)))
+    ok = True
+    for idx, chunk in enumerate(split_by_bytes(text, limit), 1):
+        payload = {
+            "touser": touser,
+            "msgtype": "markdown",
+            "agentid": int(creds["WX_AGENTID"]),
+            "markdown": {"content": chunk},
+        }
+        try:
+            resp = requests.post(
+                "https://qyapi.weixin.qq.com/cgi-bin/message/send",
+                params={"access_token": token}, json=payload, timeout=20,
+            )
+            body = resp.json()
+            if body.get("errcode") != 0:
+                log(f"  ! 应用推送第 {idx} 段失败：errcode={body.get('errcode')} {body.get('errmsg')}")
+                ok = False
+            else:
+                log(f"  应用推送第 {idx} 段成功（{len(chunk.encode('utf-8'))} 字节）")
+        except Exception as exc:  # noqa: BLE001
+            log(f"  ! 应用推送异常：{exc}")
+            ok = False
+        time.sleep(1)
+    return ok
+
+
 # ---------------------------- 主流程 ----------------------------
 
 def main() -> int:
     ap = argparse.ArgumentParser(description="漏洞情报采集与企业微信推送")
     ap.add_argument("--dry-run", action="store_true", help="只采集打印，不推送")
     ap.add_argument("--days", type=int, default=0, help="覆盖回看天数")
-    ap.add_argument("--via", choices=["cli", "webhook", "both"], default="",
-                    help="推送通道，默认读配置 wecom.channel")
+    ap.add_argument("--via", choices=["cli", "webhook", "app", "both"], default="",
+                    help="推送通道，默认读配置 wecom.channel（可用环境变量 WECOM_CHANNEL 覆盖）")
     ap.add_argument("--no-commit", action="store_true",
                     help="照常推送，但不写入已读水位（用于验收预览，下次仍会重发）")
     ap.add_argument("--config", default=str(CFG_PATH))
@@ -965,12 +1059,18 @@ def main() -> int:
         log(f"dry-run 模式，未推送。消息体积 {len(text.encode('utf-8'))} 字节")
         return 0
 
-    channel = args.via or cfg["wecom"].get("channel", "cli")
+    channel = (
+        args.via
+        or os.environ.get("WECOM_CHANNEL", "").strip()
+        or cfg["wecom"].get("channel", "cli")
+    )
     success = False
     if channel in ("cli", "both"):
         success = push_wecom_cli(text, cfg) or success
     if channel in ("webhook", "both"):
         success = push_wecom(text, cfg) or success
+    if channel in ("app", "both"):
+        success = push_wecom_app(text, cfg) or success
 
     if args.no_commit:
         # 验收预览：消息照发，但不留痕，保证正式定时任务仍会完整推送一次
