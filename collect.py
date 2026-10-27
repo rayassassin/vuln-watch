@@ -222,8 +222,13 @@ def fetch_nvd_by_cna(cna: str, since: datetime, until: datetime, cfg: dict) -> l
     return items
 
 
-def fetch_osv_asset(asset: dict, lookback_days: int) -> list[dict]:
-    """OSV：按包坐标 + 版本精确匹配。命中即代表你的项目真的用了受影响版本。"""
+def fetch_osv_asset(asset: dict, lookback_days: int, error_sink: list | None = None) -> list[dict]:
+    """
+    OSV：按包坐标 + 版本精确匹配。命中即代表你的项目真的用了受影响版本。
+
+    error_sink：查询失败时把组件名记进去，让日报能如实标注"这个源没取到"，
+    否则网络挂掉和"今天真的没漏洞"在消息里长得一模一样。
+    """
     payload: dict[str, Any] = {"package": {"name": asset["name"], "ecosystem": asset.get("eco", "Maven")}}
     has_version = bool(str(asset.get("version") or "").strip())
     if has_version:
@@ -233,14 +238,18 @@ def fetch_osv_asset(asset: dict, lookback_days: int) -> list[dict]:
         data = http_post("https://api.osv.dev/v1/query", payload).json()
     except Exception as exc:  # noqa: BLE001
         log(f"  ! OSV 失败 {asset['name']}：{exc}")
+        if error_sink is not None:
+            error_sink.append(asset["name"])
         return []
 
     cutoff = (datetime.now(timezone.utc) - timedelta(days=lookback_days)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    include_old = bool(asset.get("include_old"))
     items: list[dict] = []
     for v in data.get("vulns", []):
-        modified = (v.get("modified") or v.get("published") or "")[:20]
-        # 没配版本时按修改时间过滤，避免把该包十年前的历史漏洞全倒出来
-        if not has_version and modified < cutoff:
+        # 统一按公布时间过滤：配了版本的也要过，否则该组件历史上的老漏洞会全被倒出来。
+        # 想一次性盘点某组件的全部漏洞，给该 asset 加 include_old: true。
+        stamp = (v.get("published") or v.get("modified") or "")[:20]
+        if stamp and stamp < cutoff and not include_old:
             continue
         aliases = v.get("aliases", []) or []
         cve = next((a for a in aliases if a.startswith("CVE-")), "")
@@ -593,6 +602,19 @@ def normalize_and_score(
         else:
             continue  # 低分且无在野利用迹象，不打扰
 
+        # 陈旧条目：NVD 的窗口按 lastModified 算，几年前的漏洞改个措辞也会被捞进来。
+        # 日报只报增量，老漏洞一律不占版面（已进 KEV 的除外，那说明出了新情况）。
+        stale_days = int(policy.get("stale_days", 0) or 0)
+        if stale_days and not v["kev"]:
+            pub = (v.get("published") or "")[:10]
+            if pub:
+                try:
+                    pub_dt = datetime.fromisoformat(pub).replace(tzinfo=timezone.utc)
+                    if (datetime.now(timezone.utc) - pub_dt).days > stale_days:
+                        continue
+                except ValueError:
+                    pass
+
         results.append(v)
 
     results.sort(key=lambda x: (x["score"], x["cvss"]), reverse=True)
@@ -664,8 +686,13 @@ def _short_action(text: str) -> str:
     return t[:90] + ("…" if len(t) > 90 else "")
 
 
-def _render_item(idx: int, v: dict) -> list[str]:
-    """单条漏洞的多行描述。信息密度优先，但不堆砌。"""
+def _render_item(idx: int, v: dict, full: bool = True) -> list[str]:
+    """
+    单条漏洞的多行描述。信息密度优先，但不堆砌。
+
+    full=True 用于 P0/P1：影响 + 条件 + 范围 + 处置 + 链接
+    full=False 用于紧凑列表：只留影响与条件各一行，把篇幅让给条数
+    """
     cve = v["cve"] or v["key"]
     comp = _component_name(v)
     head = f"**{idx}. {cve}**"
@@ -684,26 +711,34 @@ def _render_item(idx: int, v: dict) -> list[str]:
     lines = [head, "　" + " ｜ ".join(tags)]
 
     # 影响：被利用之后会怎样
+    lim = 70 if full else 48
     if v.get("impact"):
-        lines.append(f"　▸ 影响：{v['impact']}")
+        lines.append(f"　▸ {v['impact']}")
     elif v.get("title"):
-        lines.append(f"　▸ 描述：{v['title'][:90]}")
+        t = v["title"][:lim]
+        lines.append(f"　▸ {t}")
 
     # 攻击条件：谁能打、要不要登录
     if v.get("attack_cond"):
-        lines.append(f"　▸ 条件：{v['attack_cond']}")
+        lines.append(f"　▸ {v['attack_cond']}")
+
+    if not full:
+        # 紧凑模式到此为止，链接附在行尾省一行
+        if v["url"]:
+            lines.append(f"　▸ [详情]({v['url']})")
+        return lines
 
     # 受影响范围
     rng = v.get("affected_range") or v.get("asset_version")
     if rng and rng != "未指定":
-        lines.append(f"　▸ 范围：{rng}")
+        lines.append(f"　▸ 范围：{rng[:80]}")
 
     # CISA 官方处置动作，比自拟建议权威（但是模板文字会压掉）
     action = _short_action(v.get("cisa_action", ""))
     if action:
         lines.append(f"　▸ 处置：{action}")
     if v["url"]:
-        lines.append(f"　▸ [查看详情]({v['url']})")
+        lines.append(f"　▸ [详情]({v['url']})")
     return lines
 
 
@@ -732,37 +767,57 @@ def render_markdown(items: list[dict], stats: dict) -> str:
     ]
     if sources:
         lines.append(f"🔍 数据源　{' · '.join(sources)}")
+    if stats.get("degraded"):
+        lines.append(f"⚠️ {'；'.join(stats['degraded'])}")
 
     idx = 0
-    # P0 展开前 5 条；再多就折叠成编号，否则一条消息长到没人读完
+    # 日报控制在一条消息内看完：P0 详述、P1 紧凑、P2 只留编号
     if p0:
         lines += ["", SEP, "", f"**🔴 立即处置（{len(p0)} 条）**", ""]
-        for v in p0[:5]:
+        for v in p0:
             idx += 1
-            lines += _render_item(idx, v)
+            lines += _render_item(idx, v, full=True)
             lines.append("")
-        if len(p0) > 5:
-            rest = "、".join((x["cve"] or x["key"]) for x in p0[5:])
-            lines += [f"　其余 {len(p0) - 5} 条：{rest}", ""]
 
-    # P1 展开前 6 条，其余给编号汇总，避免一条消息塞成论文
     if p1:
         lines += [SEP, "", f"**🟠 本周处置（{len(p1)} 条）**", ""]
-        for v in p1[:6]:
+        for v in p1:
             idx += 1
-            lines += _render_item(idx, v)
+            lines += _render_item(idx, v, full=False)
             lines.append("")
-        if len(p1) > 6:
-            rest = "、".join((x["cve"] or x["key"]) for x in p1[6:])
-            lines += [f"　其余 {len(p1) - 6} 条：{rest}", ""]
 
     # P2 只列编号，不占篇幅
     if p2:
-        names = "、".join((x["cve"] or x["key"]) for x in p2[:10])
-        more = f" 等 {len(p2)} 条" if len(p2) > 10 else ""
+        names = "、".join((x["cve"] or x["key"]) for x in p2[:8])
+        more = f" 等 {len(p2)} 条" if len(p2) > 8 else ""
         lines += [SEP, "", f"**🟡 观察列表**　{names}{more}", ""]
 
     return "\n".join(lines).strip()
+
+
+def render_degraded(stats: dict) -> str:
+    """
+    没有条目、但有数据源故障时发的短消息。
+    这种情况最危险：一次代理故障会让日报安静得像"一切太平"，
+    所以宁可多发一条，也要把"结果不完整"说到明面上。
+    """
+    until = stats["until"]
+    lines = [
+        f"**⚠️ 漏洞情报巡检异常 · {until.strftime('%m月%d日')}**",
+        "",
+        f"📅 统计区间　{stats['since'].strftime('%m-%d %H:%M')} → {until.strftime('%m-%d %H:%M')}",
+        f"📊 采集 {stats.get('scanned', 0)} 条，没有可推送条目",
+        "",
+        "但以下数据源本轮异常，**结果不完整**，不能当作今天没有漏洞：",
+    ]
+    for d in stats.get("degraded", []):
+        lines.append(f"❗ {d}")
+    lines += [
+        "",
+        "修复网络或代理后手动补跑一次：",
+        "`/opt/vuln-watch/run.sh --days 1`",
+    ]
+    return "\n".join(lines)
 
 
 def split_by_bytes(text: str, max_bytes: int) -> list[str]:
@@ -976,11 +1031,21 @@ def main() -> int:
     conn = init_db()
     now = datetime.now(timezone.utc)
 
-    # 水位：优先用上次运行时间，首次按 lookback_days
+    # 窗口：只推最近 N 天（默认 1 天）。水位只用来"缩短"窗口，绝不用来"拉长"，
+    # 否则某次失败或首次运行会把几天的存量一次性倒出来。
     last_run = db_get(conn, "last_run")
-    days = args.days or cfg["nvd"]["lookback_days"]
-    since = datetime.fromisoformat(last_run) if last_run else now - timedelta(days=days)
-    log(f"采集窗口：{since.strftime('%Y-%m-%d %H:%M')} UTC 起")
+    days = args.days or int(cfg["nvd"].get("lookback_days", 1))
+    window_start = now - timedelta(days=days)
+    since = window_start
+    if last_run:
+        try:
+            prev = datetime.fromisoformat(last_run)
+            if prev.tzinfo is None:
+                prev = prev.replace(tzinfo=timezone.utc)
+            since = max(prev, window_start)   # 取较晚者，水位再旧也不回补历史
+        except ValueError:
+            pass
+    log(f"采集窗口：{since.strftime('%Y-%m-%d %H:%M')} UTC 起（上限 {days} 天）")
 
     raw: list[dict] = []
 
@@ -988,10 +1053,12 @@ def main() -> int:
     for cna in cfg["nvd"].get("cnas", []):
         raw.extend(fetch_nvd_by_cna(cna, since, now, cfg))
 
-    # 2) OSV 按组件精确匹配
+    # 2) OSV 按组件精确匹配。窗口与 NVD 保持一致，否则 7 天的旧数据会混进来
     log("按组件清单查询 OSV ...")
-    for asset in cfg["osv"].get("assets", []):
-        hits = fetch_osv_asset(asset, cfg["osv"].get("lookback_days", 7))
+    osv_failed: list[str] = []
+    assets_all = cfg["osv"].get("assets", [])
+    for asset in assets_all:
+        hits = fetch_osv_asset(asset, days, osv_failed)
         if hits:
             log(f"  {asset['name']}@{asset.get('version') or '未指定'} → {len(hits)} 条")
         raw.extend(hits)
@@ -1030,11 +1097,6 @@ def main() -> int:
     log(f"过滤后待推送 {len(items)} 条 "
         f"(P0 {len(by_level['P0'])} / P1 {len(by_level['P1'])} / P2 {len(by_level['P2'])} 待选)")
 
-    if not items:
-        log("无新增高危漏洞，静默退出")
-        db_set(conn, "last_run", now.isoformat())
-        return 0
-
     # 统计本轮实际有数据返回的源，报告里如实列出，不虚标
     srcs: list[str] = []
     for i in raw:
@@ -1045,13 +1107,31 @@ def main() -> int:
         if extra not in srcs:
             srcs.append(extra)
 
+    # 源可用性：网络挂掉和"今天真的没漏洞"在消息里必须能区分开。
+    # 否则一次代理故障就会伪装成一切太平。
+    degraded: list[str] = []
+    if not kev:
+        degraded.append("CISA KEV 未取到，在野利用标记失效")
+    if osv_failed:
+        if len(osv_failed) >= len(assets_all):
+            degraded.append("OSV 全部失败，组件精确匹配未生效")
+        else:
+            degraded.append(f"OSV {len(osv_failed)}/{len(assets_all)} 个组件失败")
+
     stats = {
         "scanned": total_scanned,
         "since": since.astimezone(),
         "until": now.astimezone(),
         "sources": srcs,
+        "degraded": degraded,
     }
-    text = render_markdown(items, stats)
+
+    if not items and not degraded:
+        log("无新增高危漏洞，静默退出")
+        db_set(conn, "last_run", now.isoformat())
+        return 0
+
+    text = render_markdown(items, stats) if items else render_degraded(stats)
     if args.dry_run:
         print("\n" + "=" * 60)
         print(text)

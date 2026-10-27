@@ -10,7 +10,9 @@
 # 完整 CNA 名单：https://www.cve.org/PartnerInformation/ListofPartners
 nvd:
   api_key_env: NVD_API_KEY      # 可选。有 key 50 req/30s，无 key 5 req/30s
-  lookback_days: 3              # 首次回看天数，之后按 state 增量
+  # 日报只覆盖最近 1 天。水位只用来缩短窗口，不会回补历史，
+  # 所以某次失败重跑也不会把几天的存量一次性倒出来。
+  lookback_days: 1
   cnas:
     - security@apache.org       # Apache 全家桶：Tomcat / Struts / Kafka / ActiveMQ
                                 #   Pulsar / Solr / Airflow / httpd / Shiro / Dubbo
@@ -22,7 +24,8 @@ nvd:
 # npm / PyPI / Go / crates.io / NuGet。
 # 不写 version 时会拉该包全量漏洞再按 lookback 过滤，噪声较大，建议尽量填版本。
 osv:
-  lookback_days: 7
+  # 注意：实际窗口由 nvd.lookback_days / --days 决定，这里只留作说明
+  lookback_days: 1
   assets:
     # ---- Java / Spring 技术栈 ----
     - { eco: Maven, name: "org.apache.tomcat:tomcat-catalina",          version: "9.0.80", match: [tomcat] }
@@ -92,11 +95,16 @@ policy:
   epss_threshold: 0.1      # EPSS 高于此值升级为 P1
   always_push_kev: true    # 进了 CISA KEV 无条件 P0
   always_push_cvss: 9.0    # CVSS 达到此值才具备 P0 资格（仍需在野利用证据或命中自有组件）
-  # 分级配额，防止一次推送几十条把人劝退
+  # 发布超过 N 天的条目不再进日报（已进 KEV 的除外）。
+  # NVD 的采集窗口按 lastModified 算，老漏洞改个措辞也会进来；OSV 也会把
+  # 该组件历史上的漏洞全返回。这条统一挡住，保证日报只有"新增"。
+  # 顺手留 2 天容差，避免因时区/发布延迟漏掉边界当天的条目。
+  stale_days: 2
+  # 分级配额：日报要在一条消息里读完，宁可少推也不能刷屏
   quota:
-    P0: 10
-    P1: 10
-    P2: 6
+    P0: 5
+    P1: 4
+    P2: 4
 
 wecom:
   # cli      —— 走已授权的 wecom-cli 机器人（本机用）

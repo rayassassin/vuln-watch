@@ -10,7 +10,8 @@ LOG="$LOGDIR/cron-$(date +%Y%m%d).log"
 
 {
     echo "=== $(date '+%F %T') start ==="
-    "$BASE/run.sh"
+    # 显式限定一天：日报只覆盖最近 24h，不因水位落后而回补历史
+    "$BASE/run.sh" --days 1
     rc=$?
     echo "=== $(date '+%F %T') exit $rc ==="
 } >> "$LOG" 2>&1
