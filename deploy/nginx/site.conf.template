@@ -1,0 +1,93 @@
+# 漏洞情报看板：静态托管 + 反代企微回调
+#
+# 这个文件由 nginx 官方镜像的 docker-entrypoint 自动渲染：
+#   挂到 /etc/nginx/templates/*.template，容器启动时用 envsubst 把 ${VAR} 换成环境变量。
+# 因此这里只有两个变量，别写 $host / $remote_addr 之外的花括号变量。
+#
+#    SERVER_NAME        域名；未备案阶段留 _ 表示接受任意 Host
+#    CALLBACK_UPSTREAM  企微回调上游，形如 host.docker.internal:18080
+
+server {
+    # 80 走标准入口（需要域名备案，否则大陆机房会被拦）；
+    # 8080 是非标入口，备案下来之前对外就用这个。
+    # 两个端口配置完全一致，备案通过后无需改动任何东西。
+    listen 80;
+    listen 8080;
+
+    server_name ${SERVER_NAME};
+
+    root /usr/share/nginx/html;
+    index index.html;
+    charset utf-8;
+
+    # 不暴露版本号
+    server_tokens off;
+
+    # ---- 压缩：data.json 4.0 MB → 实测 517 KB，省带宽也省访客等待 ----
+    gzip on;
+    gzip_vary on;
+    gzip_min_length 1024;
+    gzip_comp_level 6;
+    gzip_types application/json text/css text/javascript application/javascript image/svg+xml;
+
+    # ---- 安全响应头（纯静态站，能加的都加） ----
+    add_header X-Content-Type-Options nosniff always;
+    add_header X-Frame-Options SAMEORIGIN always;
+    add_header Referrer-Policy strict-origin-when-cross-origin always;
+
+    # 容器健康检查用
+    location = /__health {
+        access_log off;
+        default_type text/plain;
+        return 200 "ok\n";
+    }
+
+    # 数据文件：一天只更新两次，缓存 5 分钟能挡掉绝大部分重复下载。
+    # 前端用的是 fetch("data.json", {cache:"no-store"})，这里主要给中间代理和
+    # 手动刷新之外的场景兜底，不会让访客看到过期数据。
+    #
+    # 注意：这里用 expires 而不是 add_header Cache-Control —— location 里一旦出现
+    # add_header，server 级的 add_header 就不再继承，安全头会悄悄丢掉。
+    location = /data.json {
+        expires 5m;
+        types { } default_type application/json;
+        try_files /data.json =404;
+    }
+
+    # 入口页与其余静态文件不缓存，保证改完立刻生效
+    location = / {
+        expires -1;
+        try_files /index.html =404;
+    }
+
+    location / {
+        expires -1;
+        # 纯静态站只该有 GET/HEAD。注意必须写在这里而不是 server 级：
+        # server 级的 if ($request_method ...) 会把下面 /wecom/ 的 POST 一起挡掉。
+        limit_except GET HEAD {
+            deny all;
+        }
+        try_files $uri $uri/ =404;
+    }
+
+    # ---- 企微回调反向代理 ----
+    # 用 ^~ 前缀匹配而不是精确匹配：上游的路由前缀是 /wecom/，
+    # 这样即使对方以后加子路径也不用改这里。
+    # 看板只有 index.html 和 data.json，不会与 /wecom/ 冲突。
+    location ^~ /wecom/ {
+        proxy_pass http://${CALLBACK_UPSTREAM};
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+
+        # 企微要求 5 秒内响应，超时给小一点，免得把长连接堆在这里
+        proxy_connect_timeout 3s;
+        proxy_send_timeout 8s;
+        proxy_read_timeout 8s;
+    }
+
+    # 回调请求体很小，1 MB 足够，挡住异常大包
+    client_max_body_size 1m;
+}

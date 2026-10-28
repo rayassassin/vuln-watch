@@ -1,0 +1,55 @@
+# 漏洞情报看板 · 容器化发布
+#
+# 数据目录直接挂载采集脚本的输出目录：collect.py 写完 data.json 就立即对外生效，
+# 中间不需要任何发布步骤（不再依赖 GitHub Pages、也不需要 token）。
+#
+# 用法：
+#   cp deploy.env.example .env      # 填域名与端口
+#   docker compose up -d
+#   docker compose logs -f web
+#
+# 端口说明：
+#   80   标准入口，需要域名完成 ICP 备案，否则大陆机房会被拦截
+#   8080 非标入口，备案下来之前对外用这个；两者配置完全一致
+#
+# 反代说明：
+#   nginx 接管 80 之后，原本独占 80 的企微回调服务需要让位。
+#   把它的监听端口改到 127.0.0.1:18080，由这里反代 /wecom/ 过去。
+
+services:
+  web:
+    image: nginx:1.29-alpine
+    container_name: vuln-watch-web
+    restart: unless-stopped
+
+    ports:
+      - "80:80"
+      - "${PUBLIC_PORT:-8080}:8080"
+
+    volumes:
+      # 采集输出目录，只读挂载：容器内任何时候都改不到宿主的数据
+      - ${WEB_ROOT:-/opt/vuln-watch/web}:/usr/share/nginx/html:ro
+      # 官方镜像启动时用 envsubst 渲染 templates/*.template 到 conf.d/
+      - ./nginx/site.conf.template:/etc/nginx/templates/default.conf.template:ro
+
+    environment:
+      # 未备案阶段用 _ 接受任意 Host；备案后填真实域名
+      SERVER_NAME: ${SERVER_NAME:-_}
+      CALLBACK_UPSTREAM: ${CALLBACK_UPSTREAM:-host.docker.internal:18080}
+
+    # 让容器能通过 host.docker.internal 访问宿主机 127.0.0.1 上的企微回调
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1/__health"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

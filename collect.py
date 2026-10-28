@@ -1237,10 +1237,14 @@ def write_web_data(items: list[dict], stats: dict, cfg: dict, mode: str = "daily
         "entries": entries,
     }
 
-    out_file.write_text(
-        json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
-        encoding="utf-8",
-    )
+    # 原子写：先落同目录临时文件再 rename 覆盖。
+    # 页面现在由 nginx 容器直接挂载这个目录对外服务，若边写边被读，
+    # 4 MB 的 JSON 会读到半截，前端 JSON.parse 直接报错白屏。
+    # os.replace 在同一文件系统上是原子的，读到的要么是旧版要么是新版。
+    blob = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+    tmp_file = out_dir / ".data.json.tmp"
+    tmp_file.write_text(blob, encoding="utf-8")
+    os.replace(tmp_file, out_file)
     size_kb = out_file.stat().st_size / 1024
     log(
         f"网页数据已写入 web/data.json（本轮 {len(items)} 条，新增 {fresh} 条，"
