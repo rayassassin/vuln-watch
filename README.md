@@ -210,9 +210,16 @@ cd web && python3 -m http.server 8080      # http://localhost:8080
 
 ### 发布到 GitHub Pages
 
-看板不在服务器上对外提供服务，而是推到一个纯静态仓库：
+看板不在服务器上对外提供服务，而是发布到**本仓库自己的 `gh-pages` 分支**，
+GitHub Pages 的源就指向那个分支的根目录：
 
-**https://rayassassin.github.io/vuln-watch-pages/**
+**https://rayassassin.github.io/vuln-watch/**
+
+一个仓库两用：`main` 存代码，`gh-pages` 只放 `index.html` / `data.json` / `.nojekyll`
+三个文件的孤立快照。两者历史完全隔离，不需要第二个仓库、也不需要第二份仓库权限。
+
+> Pages 免费版只能从**公开仓库**发布，所以本仓库是 public。
+> 跑 `--ensure-pages` 可以让脚本自己把 Pages 源指到 `gh-pages`。
 
 ```bash
 python3 scripts/publish_pages.py                # 手动发一次
@@ -226,7 +233,7 @@ python3 scripts/publish_pages.py --method git   # 应急：退回 git push
 服务器上 cron 会在采集成功后自动发布（`cron-run.sh` 里调用）。需要一次性配 token：
 
 1. GitHub → Settings → Developer settings → Personal access tokens → **Fine-grained tokens**
-2. Repository access 只勾 `vuln-watch-pages`，权限给 **Contents: Read and write**
+2. Repository access 只勾 `vuln-watch`（就这一项），权限给 **Contents: Read and write**
    （想让它自动启用 Pages 再补 **Pages: Read and write**）
 3. 服务器上落盘：`echo '<token>' > /opt/vuln-watch/.pages_token && chmod 600 /opt/vuln-watch/.pages_token`
 

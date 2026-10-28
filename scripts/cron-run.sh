@@ -49,7 +49,7 @@ cfg = yaml.safe_load(open("/opt/vuln-watch/vuln-watch.yaml", encoding="utf-8"))
 if state == "skip":
     why = ("服务器上没有 /opt/vuln-watch/.pages_token，"
            "看板一直停在旧版本。\n"
-           "建一个 fine-grained PAT（仅 vuln-watch-pages，Contents: Read and write）"
+           "建一个 fine-grained PAT（仅 vuln-watch，Contents: Read and write）"
            "写进这个文件，chmod 600 即可。")
 else:
     tail = ""

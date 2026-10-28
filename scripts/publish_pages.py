@@ -14,15 +14,22 @@
   没有 pack、没有长连接、不需要本地仓库，每个请求都是几十 KB 的 JSON，
   失败是「这一个请求失败」，重发即可，便宜且可诊断。
 
+为什么和代码同一个仓库、但用独立分支：
+  看板 = 本仓库的 gh-pages 分支，Pages 源就指向这个分支的根目录。
+  该分支每次只有一个无父 commit（孤立快照），main 的代码历史完全不受影响，
+  也不需要第二个仓库、第二个仓库权限。这是「一个仓库两用」最干净的做法。
+
 体积控制 —— 为什么 commit 故意没有父节点：
-  每次新建 orphan commit 再 force 覆盖 ref，旧对象不进任何分支，
+  每次新建 orphan commit 再 force 覆盖 gh-pages，旧对象不进任何分支，
   GitHub 侧 GC 之后仓库体积稳定在「一份快照」的量级。
   代价是没有历史版本可回溯 —— 这个页面本来也不需要。
+  反过来说：绝不能把这几个文件提交到 main，4 MB × 一天两次会把代码历史撑爆。
 
 只依赖标准库（urllib / base64 / hashlib），服务器上的 python3 不必装 requests。
 
-token：fine-grained PAT，只授权 rayassassin/vuln-watch-pages，
+token：fine-grained PAT，只授权 rayassassin/vuln-watch（仓库本身），
   权限 Contents: Read and write（想让脚本自动启用 Pages 再加 Pages: Read and write）。
+  注意：Pages 必须从公开仓库发布才能免费用，所以这个仓库是 public。
   取值顺序：GH_PAGES_TOKEN → GITHUB_TOKEN → 本机 gh auth token
   服务器上放 /opt/vuln-watch/.pages_token（chmod 600），cron 里 export 进来。
 
@@ -54,7 +61,7 @@ from pathlib import Path
 
 API = "https://api.github.com"
 ROOT = Path(__file__).resolve().parent.parent
-DEFAULT_REPO = "rayassassin/vuln-watch-pages"
+DEFAULT_REPO = "rayassassin/vuln-watch"
 DEFAULT_BRANCH = "gh-pages"
 STATE_PATH = ROOT / ".pages_state"
 

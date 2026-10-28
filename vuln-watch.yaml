@@ -170,9 +170,10 @@ backfill:
 # ---------- 7. 网页 ----------
 web:
   # 全景看板地址，日报尾部会带这一行。留空则不加链接（不硬编码可能失效的地址）。
-  # 托管在 GitHub Pages（仓库 rayassassin/vuln-watch-pages，由 scripts/publish_pages.py
-  # 每次采集后强制推送单个快照提交，仓库体积不随天数膨胀）。
-  public_url: "https://rayassassin.github.io/vuln-watch-pages/"
+  # 托管在本仓库自己的 gh-pages 分支（Pages 源 = gh-pages 分支根目录）。
+  # 该分支只放 index.html / data.json / .nojekyll，每次一个无父 commit 强制覆盖，
+  # 因此快照与 main 的代码历史完全隔离，仓库体积不随天数膨胀。
+  public_url: "https://rayassassin.github.io/vuln-watch/"
 
 wecom:
   # cli      —— 走已授权的 wecom-cli 机器人（本机用）
