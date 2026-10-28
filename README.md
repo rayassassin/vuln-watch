@@ -303,6 +303,41 @@ python3 scripts/healthcheck.py          # 确认两条链路都在跑、数据�
 python3 scripts/healthcheck.py --json   # 机器可读，可直接接监控
 ```
 
+### 同步守卫：每天两次，能自己修就自己修
+
+「同一份目录」不等于「一定同步」：Pages 那一步可能失败（GitHub 5xx、token 过期、
+网络抖），容器可能挂，本机改了代码也可能忘了 deploy。任何一条都会让两个入口
+悄悄对不上，而且没人发现。所以有 `sync_guard.py` 盯着：
+
+```bash
+python3 scripts/sync_guard.py            # 完整检查 + 自愈
+python3 scripts/sync_guard.py --dry-run  # 只报不做（本机试跑用）
+python3 scripts/sync_guard.py --json     # 机器可读
+```
+
+按顺序做四件事，**能自己修就自己修，修不好才喊人**：
+
+1. 容器不在 → `docker compose up -d` 拉起来
+2. Pages 快照落后（blob sha 不一致）→ 自动重发一次
+3. 重发后复检，仍不一致 → 企微告警（只发本人，不广播）
+4. 服务器 `.version` 落后 GitHub `main` → 告警提示跑 `scripts/deploy.py`
+
+服务器上 cron 每天 **12:30 / 20:00** 各跑一次；一致时只写日志不推送
+（`logs/sync-guard.log`）——告警一多就没人看了。退出码 0/1 可直接接监控。
+
+### 备案完成后：让 Pages 退场
+
+域名备案下来、服务器 80/443 放行之后，按这三步把 GitHub 那条撤掉：
+
+1. 服务器 cron 里加 `VW_PUBLISH_PAGES=0`——这一个开关同时管住两处：
+   `cron-run.sh` 不再发布 Pages，`sync_guard.py` 也不再比对远端
+   （否则 Pages 停更后会天天报「远端落后」，把真故障淹在噪音里）。
+2. `vuln-watch.yaml` 里 `web.public_url` 与 `web.backup_url` 对调，
+   让日报里的链接指向自己的域名。
+3. 确认端口放行 + 域名解析生效后再执行前两步，别让中间出现空窗。
+
+`gh-pages` 分支留着别删，随时可以恢复成双活。
+
 历史条目的厂商/组件纠正（**只需跑一次**，幂等，重复执行不产生副作用）：
 
 ```bash
