@@ -193,8 +193,13 @@ wecom:
   # 服务器上由部署配置（VW_WECOM_APP_ENV）注入 WECOM_APP_ENV 指向凭据文件
   app_env_file: ""
   app_env_file_env: WECOM_APP_ENV
-  touser: ""                # 留空则用 WX_TOUSER 环境变量，再退化为自动解析授权人
+  touser: ""                # 巡检回执 / 故障告警的收件人，留空则自动解析授权人（只发你自己）
   touser_env: WX_TOUSER
+  # 有新增漏洞时的收件人。@all = 本应用「可见范围」内所有人。
+  # 范围在企微后台的应用详情里改，不要在代码或这里维护名单。
+  # 留空则退化为只发 touser（宁可发窄，也不炸群）；广播失败也会自动降级为只发本人。
+  broadcast_touser: "@all"
+  broadcast_touser_env: WX_TOUSER_ALL
   app_max_bytes: 1800       # 应用消息 markdown 硬上限 2048 字节，留余量
   # 注意区分三个限制：CLI 通道单条 20480 字节，自建应用 2048，群机器人 webhook 也是 2048
   max_bytes: 6000

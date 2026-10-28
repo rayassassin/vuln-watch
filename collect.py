@@ -1102,6 +1102,44 @@ def render_degraded(stats: dict, cfg: dict | None = None) -> str:
     return "\n".join(lines)
 
 
+def render_patrol(stats: dict, cfg: dict | None = None) -> str:
+    """
+    巡检心跳：没有新漏洞时也要报个平安。
+
+    一天只跑一次，如果什么都不发，人是分不清「今天真的没漏洞」和「任务挂了」的。
+    所以无命中时发一条极短的回执，**只发给授权人本人**，不进群、不 @所有人。
+
+    信息密度优先：三个数字（扫了多少、命中多少、库里共多少）足够判断健康度，
+    多的话术都是噪音。
+    """
+    until = stats["until"]
+    since = stats["since"]
+    scanned = stats.get("scanned", 0)
+    sources = stats.get("sources", [])
+    web = (cfg or {}).get("web") or {}
+    main = str(web.get("public_url") or "").strip()
+    backup = str(web.get("backup_url") or "").strip()
+
+    lines = [
+        "**🛡 漏洞巡检 · 无新增** 🌶️",
+        f"时间：{until.strftime('%Y-%m-%d %H:%M:%S')}",
+        f"巡检：近 24h 扫描 {scanned} 条 → 命中 **0** 条",
+    ]
+    if sources:
+        lines.append(f"数据源：{' · '.join(sources)}")
+    lines += [
+        f"窗口：{since.strftime('%m-%d %H:%M')} → {until.strftime('%m-%d %H:%M')}",
+        "",
+        "> 各数据源正常，本轮无需处置。",
+        "> 有新增漏洞才会推送给可见范围内所有人。",
+    ]
+    if main:
+        lines.append(f"> [打开全景看板]({main})")
+    if backup:
+        lines.append(f"> 备用入口 {backup}")
+    return "\n".join(lines)
+
+
 def _load_web_data(out_file: Path) -> dict:
     """
     读取既有网页数据，兼容早期"按天数组"格式，
@@ -1401,10 +1439,37 @@ def _app_access_token(corpid: str, secret: str) -> str:
     return body["access_token"]
 
 
-def push_wecom_app(text: str, cfg: dict) -> bool:
+def _resolve_app_touser(cfg: dict, broadcast: bool) -> str:
+    """
+    应用消息收件人，两种口径：
+
+      broadcast=False  巡检心跳 / 故障告警 —— 只发授权人本人，最不打扰
+      broadcast=True   真抓到新漏洞   —— 发给应用可见范围内所有人（@all）
+
+    @all 由企业微信按「应用的可见范围」展开，不会越界发到范围外的人；
+    想缩小范围就去企微后台改应用可见范围，别在代码里维护名单。
+    """
+    personal = (
+        os.environ.get(cfg["wecom"].get("touser_env", "WX_TOUSER"), "").strip()
+        or str(cfg["wecom"].get("touser") or "").strip()
+        or _resolve_chat_id(cfg)
+    )
+    if broadcast:
+        every = (
+            os.environ.get(cfg["wecom"].get("broadcast_touser_env", "WX_TOUSER_ALL"), "").strip()
+            or str(cfg["wecom"].get("broadcast_touser") or "").strip()
+        )
+        if every:
+            return every
+    return personal
+
+
+def push_wecom_app(text: str, cfg: dict, broadcast: bool = False) -> bool:
     """
     走企业微信自建应用 message/send。服务器上没有 wecom-cli，这条通道才是主力。
     注意：应用若配置了可信 IP 白名单，未授权 IP 调用会报 60020，此时只能在该 IP 的机器上发。
+
+    broadcast=True 时发给 @all；广播失败会**降级只发授权人**，宁可发窄也不让消息丢掉。
     """
     creds = _load_app_creds(cfg)
     missing = [k for k in ("WX_CORPID", "WX_SECRET", "WX_AGENTID") if not creds.get(k)]
@@ -1412,11 +1477,7 @@ def push_wecom_app(text: str, cfg: dict) -> bool:
         log(f"! 自建应用凭据缺失：{','.join(missing)}，跳过推送")
         return False
 
-    touser = (
-        os.environ.get(cfg["wecom"].get("touser_env", "WX_TOUSER"), "").strip()
-        or str(cfg["wecom"].get("touser") or "").strip()
-        or _resolve_chat_id(cfg)
-    )
+    touser = _resolve_app_touser(cfg, broadcast)
     if not touser:
         log("! 未能确定应用消息收件人（设置环境变量 WX_TOUSER 或配置 wecom.touser）")
         return False
@@ -1429,29 +1490,41 @@ def push_wecom_app(text: str, cfg: dict) -> bool:
 
     # 应用消息 markdown 上限 2048 字节，实际按 1800 切，留出多段续标的空间
     limit = min(int(cfg["wecom"]["max_bytes"]), int(cfg["wecom"].get("app_max_bytes", 1800)))
-    ok = True
-    for idx, chunk in enumerate(split_by_bytes(text, limit), 1):
-        payload = {
-            "touser": touser,
-            "msgtype": "markdown",
-            "agentid": int(creds["WX_AGENTID"]),
-            "markdown": {"content": chunk},
-        }
-        try:
-            resp = requests.post(
-                "https://qyapi.weixin.qq.com/cgi-bin/message/send",
-                params={"access_token": token}, json=payload, timeout=20,
-            )
-            body = resp.json()
-            if body.get("errcode") != 0:
-                log(f"  ! 应用推送第 {idx} 段失败：errcode={body.get('errcode')} {body.get('errmsg')}")
-                ok = False
-            else:
-                log(f"  应用推送第 {idx} 段成功（{len(chunk.encode('utf-8'))} 字节）")
-        except Exception as exc:  # noqa: BLE001
-            log(f"  ! 应用推送异常：{exc}")
-            ok = False
-        time.sleep(1)
+
+    def send_chunks(target: str) -> bool:
+        all_ok = True
+        for idx, chunk in enumerate(split_by_bytes(text, limit), 1):
+            payload = {
+                "touser": target,
+                "msgtype": "markdown",
+                "agentid": int(creds["WX_AGENTID"]),
+                "markdown": {"content": chunk},
+            }
+            try:
+                resp = requests.post(
+                    "https://qyapi.weixin.qq.com/cgi-bin/message/send",
+                    params={"access_token": token}, json=payload, timeout=20,
+                )
+                body = resp.json()
+                if body.get("errcode") != 0:
+                    log(f"  ! 应用推送第 {idx} 段失败：errcode={body.get('errcode')} {body.get('errmsg')}")
+                    all_ok = False
+                else:
+                    log(f"  应用推送第 {idx} 段成功（{len(chunk.encode('utf-8'))} 字节）")
+                    if body.get("invaliduser"):
+                        log(f"  ! 以下收件人无效：{body['invaliduser']}")
+            except Exception as exc:  # noqa: BLE001
+                log(f"  ! 应用推送异常：{exc}")
+                all_ok = False
+            time.sleep(1)
+        return all_ok
+
+    ok = send_chunks(touser)
+    if not ok and broadcast:
+        personal = _resolve_app_touser(cfg, broadcast=False)
+        if personal and personal != touser:
+            log(f"  ! 广播给 {touser} 未成功，降级只发授权人，避免消息丢失")
+            ok = send_chunks(personal)
     return ok
 
 
@@ -1712,14 +1785,46 @@ def main() -> int:
         "degraded": degraded,
     }
 
+    channel = (
+        args.via
+        or os.environ.get("WECOM_CHANNEL", "").strip()
+        or cfg["wecom"].get("channel", "cli")
+    )
+
+    def dispatch(payload_text: str, broadcast: bool) -> bool:
+        """三通道分发。CLI / webhook 只能发固定会话，broadcast 对它们不生效。"""
+        ok = False
+        if channel in ("cli", "both"):
+            ok = push_wecom_cli(payload_text, cfg) or ok
+        if channel in ("webhook", "both"):
+            ok = push_wecom(payload_text, cfg) or ok
+        if channel in ("app", "both"):
+            ok = push_wecom_app(payload_text, cfg, broadcast=broadcast) or ok
+        return ok
+
+    # ---- 无新增：发巡检回执，只给授权人本人，不进群、不 @所有人 ----
     if not items and not degraded:
-        log("无新增高危漏洞，静默退出")
-        # 静默不等于什么都不做：一天只跑一次，若某天确实没新货，页面上的
-        # 「最后更新」会一直停在昨天，看着像服务挂了。这里只刷 generated_at
-        # 与统计（entries 从旧文件继承，不增不减），不推送、不发消息。
+        log("无新增高危漏洞，改发巡检回执（仅本人）")
+        text = render_patrol(stats, cfg)
+        # 看板仍要刷新时间戳：一天只跑一次，否则页面「最后更新」停在昨天，
+        # 看着像服务挂了。entries 从旧文件继承，不增不减。
         write_web_data([], stats, cfg)
-        db_set(conn, "last_run", now.isoformat())
-        return 0
+        if args.dry_run:
+            print("\n" + "=" * 60)
+            print(text)
+            print("=" * 60)
+            log(f"dry-run 模式，未推送。消息体积 {len(text.encode('utf-8'))} 字节")
+            return 0
+        ok = dispatch(text, broadcast=False)
+        if args.no_commit:
+            log("no-commit 模式：巡检已发送，水位未推进")
+            return 0 if ok else 1
+        if ok:
+            db_set(conn, "last_run", now.isoformat())
+            return 0
+        # 回执发不出去同样算失败：静默失败比不推送更糟
+        log("! 巡检回执推送失败，水位不推进，下次运行会重试")
+        return 1
 
     text = render_markdown(items, stats, cfg) if items else render_degraded(stats, cfg)
 
@@ -1734,18 +1839,9 @@ def main() -> int:
         log(f"dry-run 模式，未推送。消息体积 {len(text.encode('utf-8'))} 字节")
         return 0
 
-    channel = (
-        args.via
-        or os.environ.get("WECOM_CHANNEL", "").strip()
-        or cfg["wecom"].get("channel", "cli")
-    )
-    success = False
-    if channel in ("cli", "both"):
-        success = push_wecom_cli(text, cfg) or success
-    if channel in ("webhook", "both"):
-        success = push_wecom(text, cfg) or success
-    if channel in ("app", "both"):
-        success = push_wecom_app(text, cfg) or success
+    # 有真漏洞才广播给可见范围内所有人；只是数据源降级（items 为空）时
+    # 仍只发本人 —— 运维告警不该惊动全公司。
+    success = dispatch(text, broadcast=bool(items))
 
     if args.no_commit:
         # 验收预览：消息照发，但不留痕，保证正式定时任务仍会完整推送一次
