@@ -161,56 +161,8 @@ def fetch_epss(cve_ids: list[str], cfg: dict) -> dict[str, float]:
     return out
 
 
-def fetch_nvd_by_cna(
-    cna: str, since: datetime, until: datetime, cfg: dict,
-    date_field: str = "lastMod", page_size: int = 200, max_pages: int = 30,
-) -> list[dict]:
-    """
-    按 CNA（CVE 编号机构）拉取某厂商全产品线的 CVE，带分页。
-
-    date_field 决定用哪个时间维度筛：
-      - "lastMod"   —— 日常增量巡检用。窗口只有 1 天，落在这个区间的必然是新的。
-      - "published" —— 历史回填必须用这个。lastMod 会把早年漏洞因为"改了句描述"
-                        也算进最近一年，回填出来就变成一堆 2019 年的东西。
-    """
-    api_key = os.environ.get(cfg["nvd"]["api_key_env"], "").strip()
-    headers = {"apiKey": api_key} if api_key else {}
-    # NVD 要求 ISO8601 带时区，用 UTC
-    fmt = "%Y-%m-%dT%H:%M:%S.000+00:00"
-    s_str = since.astimezone(timezone.utc).strftime(fmt)
-    e_str = until.astimezone(timezone.utc).strftime(fmt)
-    params: dict[str, Any] = {"sourceIdentifier": cna, "resultsPerPage": page_size}
-    if date_field == "published":
-        params["pubStartDate"], params["pubEndDate"] = s_str, e_str
-    else:
-        params["lastModStartDate"], params["lastModEndDate"] = s_str, e_str
-
-    # 无 key 限流 5 次/30 秒，有 key 50 次/30 秒。分页会连发多个请求，必须礼让。
-    nap = 1.0 if api_key else 7.0
-    log(f"拉取 NVD CNA={cna} [{since.strftime('%Y-%m-%d')} → {until.strftime('%Y-%m-%d')}] ...")
-
-    raw: list[dict] = []
-    total: int | None = None
-    start = 0
-    for page in range(max_pages):
-        params["startIndex"] = start
-        try:
-            data = http_get(
-                "https://services.nvd.nist.gov/rest/json/cves/2.0",
-                params=params, headers=headers, timeout=90,
-            ).json()
-        except Exception as exc:  # noqa: BLE001
-            log(f"  ! NVD 失败 {cna} p{page + 1}：{exc}")
-            break
-        if total is None:
-            total = int(data.get("totalResults", 0) or 0)
-        batch = data.get("vulnerabilities", []) or []
-        raw.extend(batch)
-        start += len(batch)
-        if not batch or start >= (total or 0):
-            break
-        time.sleep(nap)
-
+def _parse_nvd_raw(raw: list[dict], src_label: str) -> list[dict]:
+    """把 NVD 原始批次解析成统一条目。CNA 与关键词两条通道共用这一份解析。"""
     items: list[dict] = []
     for wrap in raw:
         cve = wrap.get("cve", {})
@@ -236,34 +188,130 @@ def fetch_nvd_by_cna(
         items.append({
             "id": cve_id, "cve": cve_id, "title": desc[:180],
             "cvss": score, "cvss_vector": vector, "cvss_exact": True,
-            "source": f"NVD/CNA:{cna}",
+            "source": src_label,
             "url": f"https://nvd.nist.gov/vuln/detail/{cve_id}",
             "published": cve.get("published", "")[:10],
             # CISA 官方处置动作，比我们瞎猜的修复建议权威
             "cisa_action": cve.get("cisaRequiredAction", "") or "",
             "cisa_due": cve.get("cisaActionDue", "") or "",
         })
+    return items
 
-    log(f"  拿到 {len(items)} 条（{cna}，原始 {len(raw)}/{total or '?'}）")
+
+def _nvd_paged(
+    cfg: dict, extra: dict, label: str, since: datetime, until: datetime,
+    date_field: str = "lastMod", page_size: int = 200, max_pages: int = 30,
+    kw_tag: str = "",
+) -> list[dict]:
+    """
+    NVD 分页底座。CNA 与关键词两条通道只是过滤参数不同。
+
+    两个必须记住的约束：
+      1. 单次查询的时间跨度 > 120 天时 NVD 返回 404（不是 400），
+         所以回填必须先切段，见 fetch_nvd_window。
+      2. 无 key 限流 5 次/30 秒，分页之间必须礼让。
+    """
+    api_key = os.environ.get(cfg["nvd"]["api_key_env"], "").strip()
+    headers = {"apiKey": api_key} if api_key else {}
+    fmt = "%Y-%m-%dT%H:%M:%S.000+00:00"
+    s_str = since.astimezone(timezone.utc).strftime(fmt)
+    e_str = until.astimezone(timezone.utc).strftime(fmt)
+    params: dict[str, Any] = {**extra, "resultsPerPage": page_size}
+    if date_field == "published":
+        params["pubStartDate"], params["pubEndDate"] = s_str, e_str
+    else:
+        params["lastModStartDate"], params["lastModEndDate"] = s_str, e_str
+
+    nap = 1.0 if api_key else 7.0
+    log(f"拉取 NVD {label} [{since.strftime('%Y-%m-%d')} → {until.strftime('%Y-%m-%d')}] ...")
+
+    raw: list[dict] = []
+    total: int | None = None
+    start = 0
+    for page in range(max_pages):
+        params["startIndex"] = start
+        try:
+            data = http_get(
+                "https://services.nvd.nist.gov/rest/json/cves/2.0",
+                params=params, headers=headers, timeout=90,
+            ).json()
+        except Exception as exc:  # noqa: BLE001
+            log(f"  ! NVD 失败 {label} p{page + 1}：{exc}")
+            break
+        if total is None:
+            total = int(data.get("totalResults", 0) or 0)
+        batch = data.get("vulnerabilities", []) or []
+        raw.extend(batch)
+        start += len(batch)
+        if not batch or start >= (total or 0):
+            break
+        time.sleep(nap)
+
+    items = _parse_nvd_raw(raw, f"NVD/{label}")
+    if kw_tag:
+        # 打上来源关键词，normalize 阶段要用它做"是不是真的在说这个产品"的判定
+        for it in items:
+            it["kw"] = kw_tag
+    log(f"  拿到 {len(items)} 条（{label}，原始 {len(raw)}/{total or '?'}）")
     if not api_key:
         time.sleep(7)  # 无 key 限流 5 req/30s，礼貌等待
     return items
 
 
+def fetch_nvd_by_cna(
+    cna: str, since: datetime, until: datetime, cfg: dict,
+    date_field: str = "lastMod", page_size: int = 200, max_pages: int = 30,
+) -> list[dict]:
+    """
+    按 CNA（CVE 编号机构）拉取某厂商全产品线的 CVE。
+
+    date_field 决定用哪个时间维度筛：
+      - "lastMod"   —— 日常增量巡检用。窗口只有 1 天，落在这个区间的必然是新的。
+      - "published" —— 历史回填必须用这个。lastMod 会把早年漏洞因为"改了句描述"
+                        也算进最近一年，回填出来就变成一堆 2019 年的东西。
+    """
+    return _nvd_paged(
+        cfg, {"sourceIdentifier": cna}, f"CNA:{cna}", since, until,
+        date_field=date_field, page_size=page_size, max_pages=max_pages,
+    )
+
+
+def fetch_nvd_keyword(
+    keyword: str, since: datetime, until: datetime, cfg: dict,
+    date_field: str = "lastMod", page_size: int = 200, max_pages: int = 30,
+) -> list[dict]:
+    """
+    按关键词拉 NVD。
+
+    为什么需要这条通道：nginx、PostgreSQL 这类产品没有（或不用）自家 CNA，
+    PostgreSQL 的 cna@postgresql.org 实测 0 条，nginx 走的是 F5 的 CNA 但覆盖不全。
+    keywordSearch 是唯一能捞到它们的手段，代价是噪声比 CNA 高，
+    所以回填靠 min_cvss、日报靠 keyword_watch 粗筛，两层各挡一道。
+    """
+    return _nvd_paged(
+        cfg, {"keywordSearch": keyword, "keywordExactMatch": ""}, f"KW:{keyword}",
+        since, until, date_field=date_field, page_size=page_size,
+        max_pages=max_pages, kw_tag=keyword,
+    )
+
+
 def fetch_nvd_window(
-    cna: str, start: datetime, end: datetime, cfg: dict,
-    date_field: str = "published", chunk_days: int = 100,
+    target: str, start: datetime, end: datetime, cfg: dict,
+    date_field: str = "published", chunk_days: int = 100, kind: str = "cna",
 ) -> list[dict]:
     """
     回填用：NVD 单次查询的时间区间不能超过 120 天，这里按 100 天切段再合并。
     用 100 而不是 120，是给时区和 NVD 内部取整留余量。
+
+    kind="cna" 时 target 是 CNA 标识，kind="kw" 时 target 是关键词。
     """
     out: list[dict] = []
     cur = start
     while cur < end:
         nxt = min(cur + timedelta(days=chunk_days), end)
-        out.extend(fetch_nvd_by_cna(
-            cna, cur, nxt, cfg, date_field=date_field,
+        fn = fetch_nvd_by_cna if kind == "cna" else fetch_nvd_keyword
+        out.extend(fn(
+            target, cur, nxt, cfg, date_field=date_field,
             page_size=2000, max_pages=20,
         ))
         cur = nxt
@@ -549,6 +597,68 @@ def fetch_github_advisories(
     return items
 
 
+def _gh_ecosystems(cfg: dict) -> list[str]:
+    """
+    GitHub Advisory 按生态拉全量，而不是只拉"资产清单里出现过的生态"。
+
+    原因：资产清单是精确版本匹配用的，只有你手写进去的几个包；
+    但 java/python/vue/php 这些体系的漏洞绝大多数只出现在 Advisory 里
+    （NVD 对开源库收录滞后、OSV 又必须点名查询）。按生态全量拉才能补上这个洞。
+    配置里给 gh_ecosystems 可以覆盖默认值。
+    """
+    raw = cfg.get("gh_ecosystems") or ["Maven", "PyPI", "npm", "Packagist", "Go", "NuGet"]
+    out = [e for e in raw if e in GH_ECO_MAP]
+    if len(out) != len(raw):
+        bad = [e for e in raw if e not in GH_ECO_MAP]
+        log(f"  ! gh_ecosystems 里这些生态名不认识，已跳过：{bad}（可选 {list(GH_ECO_MAP)}）")
+    return out
+
+
+SUB_PATH = ROOT / "subscriptions.yaml"
+
+
+def load_subscriptions(cfg: dict) -> dict:
+    """
+    把 subscriptions.yaml 里的自定义订阅合并进配置。
+
+    为什么单开一个文件：主配置 vuln-watch.yaml 的价值一半在注释（每条订阅都写了
+    为什么关注它），用 ruamel/yaml.dump 回写会把注释和排版全部冲掉。
+    subscribe.py 只动这个纯数据的旁路文件，主配置保持人写人读。
+    """
+    if not SUB_PATH.exists():
+        return cfg
+    try:
+        sub = yaml.safe_load(SUB_PATH.read_text(encoding="utf-8")) or {}
+    except Exception as exc:  # noqa: BLE001
+        log(f"! subscriptions.yaml 解析失败，已忽略：{exc}")
+        return cfg
+
+    assets = cfg.setdefault("osv", {}).setdefault("assets", [])
+    known = {a.get("name") for a in assets}
+    added_a = 0
+    for a in sub.get("assets") or []:
+        if not a.get("name") or a["name"] in known:
+            continue
+        a.setdefault("eco", "Maven")
+        a.setdefault("match", [a["name"].split(":")[-1].split("/")[-1].lower()])
+        assets.append(a)
+        known.add(a["name"])
+        added_a += 1
+
+    nvd = cfg.setdefault("nvd", {})
+    kws = nvd.setdefault("keywords", []) or []
+    added_k = 0
+    for k in sub.get("keywords") or []:
+        if k and k not in kws:
+            kws.append(k)
+            added_k += 1
+    nvd["keywords"] = kws
+
+    if added_a or added_k:
+        log(f"自定义订阅：{added_a} 个组件、{added_k} 个关键词已并入")
+    return cfg
+
+
 # ---------------------------- 归一化与打分 ----------------------------
 
 def normalize_and_score(
@@ -566,6 +676,12 @@ def normalize_and_score(
     for it in items:
         key = it.get("cve") or it.get("id")
         if not key:
+            continue
+        # 关键词通道降噪：只认"描述开头就在说这个产品"的条目。
+        # 实测 nginx 一个月 31 条里，有 4 条是 WordPress 插件 / Okta / Traefik
+        # 在正文里顺带提了一句 nginx。这类误报混进日报，比漏报更伤信任。
+        kw = (it.get("kw") or "").lower()
+        if kw and kw not in (it.get("title") or "")[:100].lower():
             continue
         if key in merged:
             # 同一条漏洞被多个源捞到时合并来源；CVSS 优先采信精确值
@@ -690,6 +806,12 @@ COMPONENT_ALIAS = {
     "laravel/framework": "Laravel", "symfony/http-kernel": "Symfony",
     "topthink/framework": "ThinkPHP", "guzzlehttp/guzzle": "Guzzle",
     "phpmailer/phpmailer": "PHPMailer", "monolog/monolog": "Monolog",
+    # 前端 / Python / 数据库 / 容器这几条是宇神点名要覆盖的体系
+    "vue": "Vue.js", "react": "React", "next": "Next.js", "nuxt": "Nuxt",
+    "django": "Django", "flask": "Flask", "fastapi": "FastAPI",
+    "requests": "Requests", "urllib3": "urllib3", "cryptography": "cryptography",
+    "psycopg2": "psycopg2", "sqlalchemy": "SQLAlchemy",
+    "postgresql": "PostgreSQL", "psycopg": "psycopg",
 }
 SEP = "━" * 14
 
@@ -706,13 +828,35 @@ TITLE_HINTS = [
     ("spring framework", "Spring Framework"), ("spring boot", "Spring Boot"),
     ("redis", "Redis"), ("elasticsearch", "Elasticsearch"),
     ("jenkins", "Jenkins"), ("gitlab", "GitLab"), ("zookeeper", "ZooKeeper"),
+    # 下面这批是"没有自家 CNA"的常用体系，靠关键词通道捞进来
+    ("postgresql", "PostgreSQL"), ("postgres", "PostgreSQL"),
+    ("vue.js", "Vue.js"), ("vue", "Vue.js"),
+    ("cpython", "Python"), ("python", "Python"),
+    ("django", "Django"), ("flask", "Flask"), ("fastapi", "FastAPI"),
+    ("node.js", "Node.js"), ("nodejs", "Node.js"), ("express", "Express"),
+    ("jquery", "jQuery"), ("bootstrap", "Bootstrap"), ("angular", "Angular"),
+    ("mysql", "MySQL"), ("mariadb", "MariaDB"), ("mongodb", "MongoDB"),
+    ("sqlite", "SQLite"), ("php", "PHP"),
 ]
 
-# CNA 归属映射：NVD 条目没有资产坐标也没有明显标题特征时的最后兜底
+# CNA 归属映射：NVD 条目没有资产坐标也没有明显标题特征时的兜底
 CNA_VENDOR = {
     "security@apache.org": "Apache",
     "security@php.net": "PHP",
     "secalert_us@oracle.com": "Oracle",
+    "cna@python.org": "Python",
+    "f5sirt@f5.com": "F5 / NGINX",   # nginx 的 CVE 大多由 F5 作为 CNA 分配
+    "cna@postgresql.org": "PostgreSQL",
+}
+
+# 关键词通道的归属兜底：标题里没写产品名时，至少知道是哪个关键词捞来的
+KW_VENDOR = {
+    "nginx": "Nginx", "postgresql": "PostgreSQL", "postgres": "PostgreSQL",
+    "python": "Python", "vue": "Vue.js", "tomcat": "Apache Tomcat",
+    "spring framework": "Spring Framework", "struts": "Apache Struts",
+    "mysql": "MySQL", "redis": "Redis", "kubernetes": "Kubernetes",
+    "php": "PHP", "nodejs": "Node.js", "jquery": "jQuery",
+    "django": "Django", "flask": "Flask",
 }
 
 # 分级严重度排序，数字越小越严重。合并同一 CVE 的多份记录时取更严重的一级
@@ -741,6 +885,10 @@ def _component_name(v: dict) -> str:
     for src in v.get("sources", []):
         if src.startswith("NVD/CNA:"):
             vendor = CNA_VENDOR.get(src.split("NVD/CNA:", 1)[1], "")
+            if vendor:
+                return vendor
+        if src.startswith("NVD/KW:"):
+            vendor = KW_VENDOR.get(src.split("NVD/KW:", 1)[1].lower(), "")
             if vendor:
                 return vendor
     return ""
@@ -815,7 +963,16 @@ def _render_item(idx: int, v: dict, full: bool = True) -> list[str]:
     return lines
 
 
-def render_markdown(items: list[dict], stats: dict) -> str:
+def _dashboard_link(cfg: dict | None) -> str:
+    """
+    消息尾部的全景看板入口。地址来自配置 web.public_url。
+    没配就返回空串，绝不硬编码一个可能已经挂掉的地址。
+    """
+    url = str(((cfg or {}).get("web") or {}).get("public_url") or "").strip()
+    return f"🌐 全景看板　{url}" if url else ""
+
+
+def render_markdown(items: list[dict], stats: dict, cfg: dict | None = None) -> str:
     """
     渲染日报。格式对齐资讯简报：先给时间和数量，再分组给具体条目。
     信息层级：一眼看到今天几条、几条要紧、每条会有什么后果。
@@ -865,10 +1022,14 @@ def render_markdown(items: list[dict], stats: dict) -> str:
         more = f" 等 {len(p2)} 条" if len(p2) > 8 else ""
         lines += [SEP, "", f"**🟡 观察列表**　{names}{more}", ""]
 
+    link = _dashboard_link(cfg)
+    if link:
+        lines += [SEP, "", link]
+
     return "\n".join(lines).strip()
 
 
-def render_degraded(stats: dict) -> str:
+def render_degraded(stats: dict, cfg: dict | None = None) -> str:
     """
     没有条目、但有数据源故障时发的短消息。
     这种情况最危险：一次代理故障会让日报安静得像"一切太平"，
@@ -890,6 +1051,9 @@ def render_degraded(stats: dict) -> str:
         "修复网络或代理后手动补跑一次：",
         "`/opt/vuln-watch/run.sh --days 1`",
     ]
+    link = _dashboard_link(cfg)
+    if link:
+        lines += ["", link]
     return "\n".join(lines)
 
 
@@ -980,9 +1144,16 @@ def write_web_data(items: list[dict], stats: dict, cfg: dict, mode: str = "daily
                 e["level"] = prev["level"]
         book[key] = e
 
-    # 保留窗口：默认 400 天，比一年略宽，避免回填后旧数据瞬间消失
-    retention = int((cfg.get("backfill") or {}).get("retention_days", 400))
+    # 保留窗口：两种口径取更晚的那个
+    #   固定起点（backfill.start_date，宇神要的"2026-01-01 至今"）
+    #   滚动窗口（retention_days，默认 400 天）
+    # 固定起点优先，这样回填换口径后页面里的旧数据会被自动清掉，不留 2025 年的尾巴。
+    bf = cfg.get("backfill") or {}
+    retention = int(bf.get("retention_days", 400))
     cutoff = (now - timedelta(days=retention)).strftime("%Y-%m-%d")
+    start_date = str(bf.get("start_date") or "").strip()
+    if start_date and start_date > cutoff:
+        cutoff = start_date
     entries = [e for e in book.values() if not e.get("published") or e["published"] >= cutoff]
     entries.sort(key=lambda e: (e.get("published") or "", e.get("cvss") or 0), reverse=True)
 
@@ -1237,22 +1408,37 @@ def push_wecom_app(text: str, cfg: dict) -> bool:
 
 # ---------------------------- 主流程 ----------------------------
 
-def run_backfill(cfg: dict, days: int) -> int:
+def run_backfill(cfg: dict, days: int, since_date: str = "") -> int:
     """
-    一次性历史回填：把最近 N 天的漏洞灌进全景页，**不推送任何消息**。
+    一次性历史回填：把指定区间的漏洞灌进全景页，**不推送任何消息**。
+
+    两种起点：
+      --backfill N    最近 N 天
+      --since YYYY-MM-DD  从该日期到今天（宇神要的"2026-01-01 至今"就走这个，
+                           配置里 backfill.start_date 存同一个值，便于以后固化）
 
     两条刻意的设计：
     1. 不写 state.db 水位、不 mark_seen。
-       mark_seen 尤其危险——回填会把整整一年的漏洞标成"已读"，
+       mark_seen 尤其危险——回填会把整年的漏洞标成"已读"，
        明天真有新漏洞时日常任务就当成旧的漏掉了。
-    2. 区间只取到"昨天 00:00"，今天产生的留给日常任务去推送。
-       这样回填和推送各管一段，既不重复也不漏。
+    2. 区间取到"现在"而不是"昨天 00:00"。
+       回填不推送，不存在与日报重复的问题；取到此刻才不会在 data.json 里
+       留一段"今天已发布但没人抓"的空洞。
     """
     bf = cfg.get("backfill") or {}
     now = datetime.now(timezone.utc)
-    end = (now - timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
-    start = end - timedelta(days=days)
-    log(f"历史回填区间：{start.strftime('%Y-%m-%d')} → {end.strftime('%Y-%m-%d')}（{days} 天，不推送）")
+
+    if since_date:
+        start = datetime.fromisoformat(since_date).replace(tzinfo=timezone.utc)
+        end = now
+        log(f"历史回填区间：{start.strftime('%Y-%m-%d')} → {end.strftime('%Y-%m-%d')}（固定起点，不推送）")
+    else:
+        n = days or int(bf.get("days", 365))
+        end = now
+        start = end - timedelta(days=n)
+        log(f"历史回填区间：{start.strftime('%Y-%m-%d')} → {end.strftime('%Y-%m-%d')}（{n} 天，不推送）")
+
+    days_span = max(1, (end - start).days)
 
     # 回填必须放宽两处策略，否则一年数据会被"只报新增"的规则全部过滤掉：
     #   stale_days=0 → 关掉"发布超过 N 天丢弃"
@@ -1269,17 +1455,20 @@ def run_backfill(cfg: dict, days: int) -> int:
 
     raw: list[dict] = []
 
-    # 1) NVD：按 CNA 拉厂商全量，按发布时间切段
+    # 1) NVD 双通道：CNA（厂商全家桶）+ 关键词（没自家 CNA 的产品，如 nginx/postgresql）
     chunk = int(bf.get("nvd_chunk_days", 100))
     for cna in cfg["nvd"].get("cnas", []):
         raw.extend(fetch_nvd_window(cna, start, end, cfg, date_field="published", chunk_days=chunk))
+    for kw in cfg["nvd"].get("keywords", []) or []:
+        raw.extend(fetch_nvd_window(kw, start, end, cfg, date_field="published",
+                                    chunk_days=chunk, kind="kw"))
 
     # 2) OSV：组件维度，回填窗口 = 整个区间
     log("按组件清单查询 OSV（历史窗口）...")
     osv_failed: list[str] = []
     assets_all = cfg["osv"].get("assets", [])
     for asset in assets_all:
-        hits = fetch_osv_asset(asset, days, osv_failed)
+        hits = fetch_osv_asset(asset, days_span, osv_failed)
         if hits:
             log(f"  {asset['name']}@{asset.get('version') or '未指定'} → {len(hits)} 条")
         raw.extend(hits)
@@ -1287,8 +1476,9 @@ def run_backfill(cfg: dict, days: int) -> int:
     # 3) Packagist PHP 生态
     raw.extend(fetch_packagist_update(int(start.timestamp()), cfg))
 
-    # 4) GitHub Advisory
-    ecos = sorted({a.get("eco", "Maven") for a in assets_all})
+    # 4) GitHub Advisory：按生态全量（java/python/vue/php 的主力来源）
+    ecos = _gh_ecosystems(cfg)
+    log(f"GitHub Advisory 按生态全量拉取：{', '.join(ecos)}")
     raw.extend(fetch_github_advisories(ecos, start, cfg, max_pages=int(bf.get("gh_max_pages", 12))))
 
     total_scanned = len(raw)
@@ -1345,6 +1535,8 @@ def main() -> int:
     ap.add_argument("--days", type=int, default=0, help="覆盖回看天数")
     ap.add_argument("--backfill", type=int, default=0, metavar="DAYS",
                     help="历史回填：抓最近 N 天漏洞写入全景页，不推送、不动水位")
+    ap.add_argument("--since", default="", metavar="YYYY-MM-DD",
+                    help="历史回填：从该日期到今天（优先于 --backfill），如 2026-01-01")
     ap.add_argument("--via", choices=["cli", "webhook", "app", "both"], default="",
                     help="推送通道，默认读配置 wecom.channel（可用环境变量 WECOM_CHANNEL 覆盖）")
     ap.add_argument("--no-commit", action="store_true",
@@ -1354,10 +1546,11 @@ def main() -> int:
 
     with open(args.config, encoding="utf-8") as f:
         cfg = yaml.safe_load(f)
+    cfg = load_subscriptions(cfg)
 
     # 回填是独立通道：不碰推送、不碰水位，跑完就退出
-    if args.backfill > 0:
-        return run_backfill(cfg, args.backfill)
+    if args.backfill > 0 or args.since:
+        return run_backfill(cfg, args.backfill, since_date=args.since)
 
     conn = init_db()
     now = datetime.now(timezone.utc)
@@ -1380,9 +1573,11 @@ def main() -> int:
 
     raw: list[dict] = []
 
-    # 1) NVD 按 CNA 拉厂商全家桶
+    # 1) NVD 双通道：CNA 厂商全家桶 + 关键词（覆盖 nginx/postgresql 这类无自家 CNA 的产品）
     for cna in cfg["nvd"].get("cnas", []):
         raw.extend(fetch_nvd_by_cna(cna, since, now, cfg))
+    for kw in cfg["nvd"].get("keywords", []) or []:
+        raw.extend(fetch_nvd_keyword(kw, since, now, cfg))
 
     # 2) OSV 按组件精确匹配。窗口与 NVD 保持一致，否则 7 天的旧数据会混进来
     log("按组件清单查询 OSV ...")
@@ -1397,9 +1592,8 @@ def main() -> int:
     # 3) Packagist PHP 新增
     raw.extend(fetch_packagist_update(int(since.timestamp()), cfg))
 
-    # 4) GitHub Advisory
-    ecos = sorted({a.get("eco", "Maven") for a in cfg["osv"].get("assets", [])})
-    raw.extend(fetch_github_advisories(ecos, since, cfg))
+    # 4) GitHub Advisory：按生态全量，而不是只看资产清单出现过的生态
+    raw.extend(fetch_github_advisories(_gh_ecosystems(cfg), since, cfg))
 
     total_scanned = len(raw)
     log(f"原始采集 {total_scanned} 条，开始归一化打分 ...")
@@ -1462,7 +1656,7 @@ def main() -> int:
         db_set(conn, "last_run", now.isoformat())
         return 0
 
-    text = render_markdown(items, stats) if items else render_degraded(stats)
+    text = render_markdown(items, stats, cfg) if items else render_degraded(stats, cfg)
 
     # 网页数据：把命中条目 + 统计导出为 JSON，供 web/ 前端读取展示。
     # 纯只读旁路，不影响推送与 state.db 水位。dry-run 也照写，便于本机预览。

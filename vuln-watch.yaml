@@ -18,6 +18,31 @@ nvd:
                                 #   Pulsar / Solr / Airflow / httpd / Shiro / Dubbo
     - security@php.net          # PHP 解释器本体
     - secalert_us@oracle.com    # Oracle 全家桶：JDK / WebLogic / MySQL
+    - cna@python.org            # Python / CPython 官方
+    - f5sirt@f5.com             # F5 与 NGINX（nginx 的 CVE 大都由 F5 作为 CNA 分配）
+  # 关键词通道：给"没有自家 CNA"的产品兜底。
+  # 实测（30 天窗口）nginx 31 条、postgresql 42 条、python 136 条、vue 8 条；
+  # 而 cna@postgresql.org 返回 0 条——这类产品只能靠 keywordSearch。
+  # 代价是噪声比 CNA 高，所以回填靠 min_cvss 挡、日报靠 keyword_watch 挡。
+  keywords:
+    - nginx
+    - postgresql
+    - python
+    - vue
+    - redis
+    - kubernetes
+    - docker
+
+# GitHub Advisory 按生态全量拉取（不依赖资产清单）。
+# 这是 java/python/vue/php 覆盖面最大的来源：NVD 对开源库收录滞后，
+# OSV 又必须点名查询，只有这里能"按生态"看新增。
+gh_ecosystems:
+  - Maven       # Java
+  - PyPI        # Python
+  - npm         # JS / Vue / React
+  - Packagist   # PHP
+  - Go
+  - NuGet
 
 # ---------- 2. OSV：按组件坐标 + 版本精确匹配 ----------
 # 这是"命中你的资产"最准的方式。ecosystem 可选 Maven / Packagist /
@@ -52,6 +77,25 @@ osv:
     - { eco: Packagist, name: "monolog/monolog",       version: "", match: [monolog] }
     - { eco: Packagist, name: "topthink/framework",    version: "", match: [thinkphp] }
     - { eco: Packagist, name: "phpmailer/phpmailer",   version: "", match: [phpmailer] }
+
+    # ---- 前端 / Node ----
+    - { eco: npm, name: "vue",        version: "", match: [vue.js, vue] }
+    - { eco: npm, name: "vue-router", version: "", match: [vue-router] }
+    - { eco: npm, name: "axios",      version: "", match: [axios] }
+    - { eco: npm, name: "express",    version: "", match: [express] }
+    - { eco: npm, name: "lodash",     version: "", match: [lodash] }
+    - { eco: npm, name: "next",       version: "", match: [next.js] }
+
+    # ---- Python ----
+    - { eco: PyPI, name: "django",       version: "", match: [django] }
+    - { eco: PyPI, name: "flask",        version: "", match: [flask] }
+    - { eco: PyPI, name: "fastapi",      version: "", match: [fastapi] }
+    - { eco: PyPI, name: "requests",     version: "", match: [requests] }
+    - { eco: PyPI, name: "urllib3",      version: "", match: [urllib3] }
+    - { eco: PyPI, name: "cryptography", version: "", match: [cryptography] }
+    - { eco: PyPI, name: "sqlalchemy",   version: "", match: [sqlalchemy] }
+    - { eco: PyPI, name: "psycopg2",     version: "", match: [psycopg2] }
+    - { eco: PyPI, name: "redis",        version: "", match: [redis-py] }
 
 # ---------- 3. 中间件 / 服务器的纯文本监控 ----------
 # 这类东西不是语言包，OSV 覆盖不到，走 NVD 关键词 + KEV 兜底。
@@ -108,18 +152,25 @@ policy:
 
 # ---------- 6. 历史回填：给全景页灌基数 ----------
 # 只影响 web/data.json 的内容，不影响日报推送。
-# 命令：python collect.py --backfill 365
+# 命令：python collect.py --since 2026-01-01
 backfill:
-  days: 365                # 默认回填窗口
+  days: 365                # --backfill N 且没给 --since 时的默认窗口
+  # 全景页固定起点。改了这里，data.json 里早于它的条目会在下次写入时被清掉。
+  start_date: "2026-01-01"
   min_cvss: 7.0            # 回填收录门槛，比日报宽松就调这里
   # 全景页按 CNA 全量收录（订阅了 Apache/Oracle/PHP 就算你的关注范围），
   # 不再过关键词粗筛——否则一年只剩几十条，页面没有"全景"的用处。
   # 想让全景也只显示中间件相关，改成 true。
   keyword_filter: false
   nvd_chunk_days: 100      # NVD 单次查询上限 120 天，切 100 留余量
-  gh_max_pages: 12         # GitHub Advisory 分页上限（一年数据 3 页不够）
-  max_entries: 6000        # 兜底上限：Oracle 季度批量公告可能一次灌上千条
-  retention_days: 400      # data.json 保留天数，比一年略宽
+  gh_max_pages: 20         # GitHub Advisory 每生态分页上限（6 个生态，匿名 60 次/小时够）
+  max_entries: 12000       # 兜底上限：Oracle 季度批量公告可能一次灌上千条
+  retention_days: 400      # 滚动保留天数（start_date 更晚时以 start_date 为准）
+
+# ---------- 7. 网页 ----------
+web:
+  # 全景看板地址，日报尾部会带这一行。留空则不加链接（不硬编码可能失效的地址）。
+  public_url: ""
 
 wecom:
   # cli      —— 走已授权的 wecom-cli 机器人（本机用）

@@ -210,6 +210,33 @@
     overflow: hidden; margin-bottom: 20px;
   }
   .table-scroll { overflow-x: auto; }
+
+  /* ===== 分页 ===== */
+  .pager {
+    display: flex; align-items: center; justify-content: center; gap: 6px;
+    padding: 4px 0 22px; flex-wrap: wrap;
+  }
+  .pager button {
+    min-width: 34px; height: 32px; padding: 0 10px;
+    border: 1px solid var(--line); background: var(--panel); color: var(--text-2);
+    border-radius: 8px; font-size: 13px; cursor: pointer; font-family: inherit;
+    transition: all .14s;
+  }
+  .pager button:hover:not(:disabled) { border-color: var(--brand); color: var(--brand); }
+  .pager button.on { background: var(--brand); border-color: var(--brand); color: #fff; font-weight: 600; }
+  .pager button:disabled { opacity: .38; cursor: not-allowed; }
+  .pager .dots { color: var(--text-3); padding: 0 2px; }
+  .pager .info { color: var(--text-3); font-size: 12.5px; margin-left: 10px; }
+  /* 结果栏里的紧凑翻页：50 行表格翻到页底太远，顶部也得有个"下一页" */
+  .pager-mini { display: inline-flex; align-items: center; gap: 4px; }
+  .pager-mini button {
+    width: 26px; height: 24px; border: 1px solid var(--line); background: var(--panel);
+    color: var(--text-2); border-radius: 6px; cursor: pointer; font-size: 13px;
+    line-height: 1; font-family: inherit; transition: all .14s;
+  }
+  .pager-mini button:hover:not(:disabled) { border-color: var(--brand); color: var(--brand); }
+  .pager-mini button:disabled { opacity: .35; cursor: not-allowed; }
+  .pager-mini .info { color: var(--text-3); font-size: 12px; }
   table.models { width: 100%; border-collapse: collapse; font-size: 13.5px; }
   table.models thead th {
     text-align: left; padding: 12px 12px; font-size: 12px; font-weight: 600;
@@ -421,6 +448,7 @@
   <div class="result-bar">
     <span class="result-count" id="resultCount">加载中…</span>
     <span class="spacer"></span>
+    <span id="pagerTop" class="pager-mini"></span>
     <span id="rangeLabel" style="font-size:12px;color:var(--text-3)"></span>
   </div>
 
@@ -450,6 +478,8 @@
     <div class="cards" id="cardView" style="display:none"></div>
 
     <div id="emptyState"></div>
+
+    <div class="pager" id="pager"></div>
   </div>
 
   <!-- ============ 趋势 ============ -->
@@ -477,7 +507,7 @@ const RANGES = [[7, "近 7 天"], [30, "近 30 天"], [90, "近 90 天"], [365, 
 const $ = (s) => document.querySelector(s);
 
 let DATA = { entries: [], daily: [], stats: {}, sources: [], degraded: [], range: {}, last_run: null };
-let state = { range: 365, level: "all", flags: new Set(), comps: new Set(), search: "", sort: "newest", view: "table" };
+let state = { range: 0, level: "all", flags: new Set(), comps: new Set(), search: "", sort: "newest", view: "table", page: 1 };
 
 function esc(s) {
   return (s || "").replace(/[&<>"']/g, c => ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;" }[c]));
@@ -606,7 +636,40 @@ function renderCards(list) {
   }).join("");
 }
 
-const RENDER_LIMIT = 500;   // 一年数据有四千条，全量塞进 DOM 会卡；超出只渲染前 N 条
+const PAGE_SIZE = 50;   // 每页条数。500 行一次塞进 DOM 会卡，翻页比"截断前 N 条"厚道
+
+function pageCount(total) { return Math.max(1, Math.ceil(total / PAGE_SIZE)); }
+
+function renderPager(total) {
+  const pages = pageCount(total);
+  const cur = Math.min(Math.max(1, state.page), pages);
+  if (!total) { $("#pager").innerHTML = ""; $("#pagerTop").innerHTML = ""; return; }
+
+  // 顶部紧凑翻页：表格 50 行，翻到页底太远
+  $("#pagerTop").innerHTML = pages > 1
+    ? `<button data-page="${cur - 1}" ${cur === 1 ? "disabled" : ""} title="上一页">‹</button>
+       <span class="info">${cur}/${pages}</span>
+       <button data-page="${cur + 1}" ${cur === pages ? "disabled" : ""} title="下一页">›</button>`
+    : `<span class="info">${total} 条</span>`;
+
+  if (pages <= 1) { $("#pager").innerHTML = `<span class="info">共 ${total} 条</span>`; return; }
+
+  // 底部完整页码：首页 + 当前页前后各 2 页 + 末页，中间用省略号收起来
+  const nums = new Set([1, pages]);
+  for (let n = cur - 2; n <= cur + 2; n++) if (n > 1 && n < pages) nums.add(n);
+  const seq = [...nums].sort((a, b) => a - b);
+
+  let html = `<button data-page="${cur - 1}" ${cur === 1 ? "disabled" : ""}>上一页</button>`;
+  let prev = 0;
+  for (const n of seq) {
+    if (prev && n - prev > 1) html += `<span class="dots">…</span>`;
+    html += `<button data-page="${n}" class="${n === cur ? "on" : ""}">${n}</button>`;
+    prev = n;
+  }
+  html += `<button data-page="${cur + 1}" ${cur === pages ? "disabled" : ""}>下一页</button>`;
+  html += `<span class="info">第 ${cur}/${pages} 页 · 共 ${total} 条</span>`;
+  $("#pager").innerHTML = html;
+}
 
 function syncSortUI() {
   document.querySelectorAll("table.models thead th.sortable").forEach(th => {
@@ -618,10 +681,14 @@ function syncSortUI() {
 
 function render() {
   const all = filtered();
-  const list = all.slice(0, RENDER_LIMIT);
-  $("#resultCount").textContent = all.length > RENDER_LIMIT
-    ? `筛出 ${all.length} 条 / 全库 ${DATA.entries.length} 条 · 仅显示前 ${RENDER_LIMIT} 条，用筛选或搜索缩小范围`
-    : `筛出 ${all.length} 条 / 全库 ${DATA.entries.length} 条`;
+  const pages = pageCount(all.length);
+  if (state.page > pages) state.page = pages;   // 筛选变窄后页码越界，回落到最后一页
+  const start = (state.page - 1) * PAGE_SIZE;
+  const list = all.slice(start, start + PAGE_SIZE);
+
+  $("#resultCount").textContent = all.length
+    ? `筛出 ${all.length} 条 / 全库 ${DATA.entries.length} 条 · 第 ${start + 1}-${start + list.length} 条`
+    : `筛出 0 条 / 全库 ${DATA.entries.length} 条`;
   const empty = all.length === 0;
   $("#emptyState").innerHTML = empty
     ? `<div class="empty"><div class="big">🛡️</div>没有符合筛选条件的漏洞</div>` : "";
@@ -634,6 +701,7 @@ function render() {
     $("#cardView").style.display = empty ? "none" : "grid";
     renderCards(list);
   }
+  renderPager(all.length);
   renderStats(all);
   renderTrend();
   syncSortUI();
@@ -758,28 +826,42 @@ async function load() {
 /* ---------- 事件 ---------- */
 $("#rangeChips").addEventListener("click", e => {
   const c = e.target.closest(".chip[data-range]"); if (!c) return;
-  state.range = Number(c.dataset.range); renderRangeChips(); render();
+  state.range = Number(c.dataset.range); state.page = 1; renderRangeChips(); render();
 });
 $("#levelChips").addEventListener("click", e => {
   const c = e.target.closest(".chip[data-level]"); if (!c) return;
-  state.level = c.dataset.level; renderLevelChips(); render();
+  state.level = c.dataset.level; state.page = 1; renderLevelChips(); render();
 });
 $("#flagChips").addEventListener("click", e => {
   const c = e.target.closest(".chip[data-flag]"); if (!c) return;
   const v = c.dataset.flag;
   state.flags.has(v) ? state.flags.delete(v) : state.flags.add(v);
-  renderFlagChips(); render();
+  state.page = 1; renderFlagChips(); render();
 });
 $("#compChips").addEventListener("click", e => {
   const c = e.target.closest(".chip[data-comp]"); if (!c) return;
   const v = c.dataset.comp;
   state.comps.has(v) ? state.comps.delete(v) : state.comps.add(v);
-  renderCompChips(); render();
+  state.page = 1; renderCompChips(); render();
 });
-$("#search").addEventListener("input", e => { state.search = e.target.value.trim(); render(); });
-$("#sortSelect").addEventListener("change", e => { state.sort = e.target.value; render(); });
+$("#search").addEventListener("input", e => { state.search = e.target.value.trim(); state.page = 1; render(); });
+$("#sortSelect").addEventListener("change", e => { state.sort = e.target.value; state.page = 1; render(); });
 document.querySelectorAll("table.models thead th.sortable").forEach(th => {
-  th.addEventListener("click", () => { state.sort = th.dataset.sort; render(); });
+  th.addEventListener("click", () => { state.sort = th.dataset.sort; state.page = 1; render(); });
+});
+// 分页按钮在顶部和底部各一套，用委托统一处理
+document.addEventListener("click", e => {
+  const b = e.target.closest("#pager button[data-page], #pagerTop button[data-page]");
+  if (!b || b.disabled) return;
+  const pages = pageCount(filtered().length);
+  const n = Number(b.dataset.page);
+  if (!n || n < 1 || n > pages || n === state.page) return;
+  state.page = n;
+  render();
+  // 顶部翻页就停在顶部，底部翻页回到列表开头
+  if (!b.closest("#pagerTop")) {
+    document.getElementById("latest").scrollIntoView({ behavior: "smooth", block: "start" });
+  }
 });
 $("#viewSeg").addEventListener("click", e => {
   const b = e.target.closest("button[data-view]"); if (!b) return;

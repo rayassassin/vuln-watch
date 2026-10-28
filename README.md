@@ -22,6 +22,9 @@ python collect.py --days 1 --no-commit
 
 # 4. 指定通道
 python collect.py --via cli        # cli | webhook | both
+
+# 5. 回填全景页：从 2026-01-01 到现在（不推送、不动水位）
+python collect.py --since 2026-01-01
 ```
 
 生产环境跑在云服务器，每天 00:00 和 12:00 由系统 cron 触发；本机只做开发与同步（见下面「部署到云服务器」）。
@@ -39,12 +42,19 @@ python collect.py --via cli        # cli | webhook | both
 
 | 源 | 覆盖 | 接入 |
 |---|---|---|
-| NVD（按 CNA 过滤） | Apache 全家桶 / PHP / Oracle 全产品线 | REST API 2.0，`sourceIdentifier` 参数 |
+| NVD（按 CNA 过滤） | Apache / PHP / Oracle / Python / F5+NGINX 全产品线 | REST API 2.0，`sourceIdentifier` 参数 |
+| NVD（关键词通道） | nginx / postgresql / vue / redis / k8s / docker —— 没有自家 CNA 的产品 | `keywordSearch` + `keywordExactMatch` |
 | OSV.dev | Maven / Composer / npm / PyPI / Go | `POST /v1/query`，包名+版本精确匹配 |
 | CISA KEV | 已确认在野利用的漏洞 | 直下 JSON |
 | FIRST EPSS | 未来 30 天被利用概率 | `api.first.org/data/v1/epss`，批量传 CVE |
-| GitHub Advisory | GHSA + CVE 映射 | REST `/advisories`，按 ecosystem 分页 |
+| GitHub Advisory | **按生态全量**：Maven / PyPI / npm / Packagist / Go / NuGet | REST `/advisories`，按 ecosystem 分页 |
 | Packagist | PHP 全量新增通告 | `?updatedSince=<timestamp>`，免认证 |
+
+> **为什么非要关键词通道**：实测 `cna@postgresql.org` 返回 0 条，`security@nginx.com` 也是 0 条，
+> nginx 的 CVE 主要由 F5 作为 CNA 分配（已订阅 `f5sirt@f5.com`），但覆盖不全。
+> 这类"没有自家 CNA"的产品只能靠 `keywordSearch` 捞，代价是噪声高——
+> 所以抓到后会再做一道「关键词必须出现在描述前 100 字」的判定，
+> 挡掉那种"WordPress 插件正文里顺带提了一句 nginx"的误报。
 
 ## 日报长什么样
 
@@ -156,14 +166,35 @@ python3 scripts/deploy.py
 **失败一定告警**：`cron-run.sh` 捕获非 0 退出码，通过同一应用通道发「🔴 漏洞日报推送失败」
 并附日志最后几行；告警本身失败也会在日志里留一行，不留静默黑洞。
 
+## 定制化订阅：我用了 X，就盯 X
+
+不用改主配置，一条命令：
+
+```bash
+python scripts/subscribe.py add vue                         # 常见名字，自动判断该走包坐标还是关键词
+python scripts/subscribe.py add "org.springframework:spring-core" --eco Maven --version 5.3.31
+python scripts/subscribe.py add nginx --keyword             # 没有包坐标的产品
+python scripts/subscribe.py test nginx --days 30            # 先看两周能命中多少，再决定加不加
+python scripts/subscribe.py list                            # 看现在都订了什么
+python scripts/subscribe.py remove vue
+```
+
+写入独立的 `subscriptions.yaml`（纯数据文件，不动主配置的注释），
+`collect.py` 每次启动自动合并进去。加完回填一次：
+`python collect.py --since 2026-01-01`。
+
+内置目录覆盖了 60 多个常见组件（nginx / postgresql / redis / vue / react / django /
+flask / spring / log4j / shiro / laravel / thinkphp …）。不在目录里的名字会退化成
+NVD 关键词订阅并给出提示。
+
 ## 网页可视化（web/）
 
 除企业微信推送外，`collect.py` 每次运行还会把命中条目导出到 `web/data.json`，
 由 `web/index.html` 渲染成情报全景看板（浅色主题，视觉参照 ai-radix 的全景页）。
 
 ```bash
-# 首次：回填最近一年，页面才有"全景"可看
-python3 collect.py --backfill 365
+# 首次 / 换口径：回填 2026-01-01 到现在，页面才有"全景"可看
+python3 collect.py --since 2026-01-01
 
 # 之后每次日常运行都会把新命中合并进同一份 data.json
 python3 collect.py --dry-run --days 1
@@ -172,25 +203,28 @@ python3 collect.py --dry-run --days 1
 cd web && python3 -m http.server 8080      # http://localhost:8080
 ```
 
-页面包含：统计条（收录量 / P0 / P1 / KEV）、时间范围筛选（7/30/90/365 天）、
-分级与标签筛选、组件筛选、搜索、排序、表格 / 卡片两种视图、命中趋势图（跨度超 70 天自动按月聚合）。
+页面包含：统计条（收录量 / P0 / P1 / KEV）、时间范围筛选（7/30/90/365 天 / 全部）、
+分级与标签筛选、组件筛选、搜索、排序（默认**按发布日期倒序**，最新在最前）、
+表格 / 卡片两种视图、**每页 50 条分页**（顶部有紧凑翻页，底部有完整页码）、
+命中趋势图（跨度超 70 天自动按月聚合）。
 
 ### 回填 vs 日常，两条通道各管一段
 
-| | `--backfill N` | 日常运行 |
+| | `--since` / `--backfill N` | 日常运行 |
 |---|---|---|
 | 目的 | 给全景页灌历史基数 | 发现新漏洞并推送 |
 | NVD 时间字段 | `pubStartDate`（按发布时间） | `lastModStartDate`（按修改时间） |
-| 时间区间 | 昨天 00:00 往前推 N 天 | 上次运行至今，上限 1 天 |
+| 时间区间 | `--since` 固定起点到现在；`--backfill N` 从 N 天前到现在 | 上次运行至今，上限 1 天 |
+| NVD 通道 | CNA + 关键词 | CNA + 关键词 |
 | 推送 | **不推送** | 推送企业微信 |
 | `state.db` 水位 | **不写、不 mark_seen** | 成功才推进 |
-| `stale_days` | 关闭（否则一年数据全被过滤） | 2 天 |
+| `stale_days` | 关闭（否则历史数据全被过滤） | 2 天 |
 | 关键词粗筛 | 默认关闭（按订阅的 CNA 全量收录） | 开启 |
-| 配额截断 | 不截断（仅 6000 条兜底） | P0:5 / P1:4 / P2:4 |
+| 配额截断 | 不截断（仅 12000 条兜底） | P0:5 / P1:4 / P2:4 |
 
-**为什么回填不写水位、不 mark_seen**：回填会把整整一年的漏洞标成「已读」，
-第二天真有新漏洞时日常任务就把它当旧的漏掉了。区间也只取到昨天 00:00，
-今天产生的留给日常任务推送，两边不重不漏。
+**为什么回填不写水位、不 mark_seen**：回填会把几百天的漏洞标成「已读」，
+第二天真有新漏洞时日常任务就把它当旧的漏掉了。区间取到"此刻"是因为回填不推送，
+不存在与日报重复的问题，取到此刻才不会在 data.json 里留一段"今天已发布但没人抓"的空洞。
 
 ### data.json 格式（v2）
 

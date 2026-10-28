@@ -1,0 +1,16 @@
+# ============================================================
+# 自定义订阅（由 scripts/subscribe.py 维护，也可以手改）
+#
+# collect.py 每次启动会把这个文件合并进 vuln-watch.yaml：
+#   assets   → 追加到 osv.assets（包坐标精确匹配）
+#   keywords → 追加到 nvd.keywords（NVD 关键词通道）
+#
+# 加完记得回填一次，页面才会有历史：
+#   python collect.py --since 2026-01-01
+# ============================================================
+
+assets:
+  []
+
+keywords:
+  []
