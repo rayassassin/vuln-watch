@@ -21,3 +21,9 @@ vuln-watch.local.yaml
 
 # 网页运行时数据：由 collect.py 现场生成，服务器/本机各自维护
 web/data.json
+
+# Pages 发布指纹：记录上一次发布的内容，内容没变就不重复推
+.pages_state
+
+# Pages 发布用 fine-grained PAT，只在服务器本地存在
+.pages_token
