@@ -636,7 +636,9 @@ function renderCards(list) {
   }).join("");
 }
 
-const PAGE_SIZE = 50;   // 每页条数。500 行一次塞进 DOM 会卡，翻页比"截断前 N 条"厚道
+// 每页条数。20 条一屏：手机上一屏能看完，翻页按钮不用滚很远，
+// 每次 render 只重建 20 行 DOM，弱机/弱网下切换筛选也跟手。
+const PAGE_SIZE = 20;
 
 function pageCount(total) { return Math.max(1, Math.ceil(total / PAGE_SIZE)); }
 
