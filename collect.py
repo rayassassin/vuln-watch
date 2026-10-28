@@ -1714,6 +1714,10 @@ def main() -> int:
 
     if not items and not degraded:
         log("无新增高危漏洞，静默退出")
+        # 静默不等于什么都不做：一天只跑一次，若某天确实没新货，页面上的
+        # 「最后更新」会一直停在昨天，看着像服务挂了。这里只刷 generated_at
+        # 与统计（entries 从旧文件继承，不增不减），不推送、不发消息。
+        write_web_data([], stats, cfg)
         db_set(conn, "last_run", now.isoformat())
         return 0
 

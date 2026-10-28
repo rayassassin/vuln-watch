@@ -158,11 +158,15 @@ python3 scripts/deploy.py
 定时任务（服务器 crontab，路径按你的安装目录改）：
 
 ```
-0 0,12 * * * /opt/vuln-watch/scripts/cron-run.sh
+0 12 * * * /opt/vuln-watch/scripts/cron-run.sh
 ```
 
-每天 00:00 与 12:00 各抓一次。两次窗口都取最近 24h，刻意留重叠，
-配合 `state.db` 的 `mark_seen` 水位去重：宁可多查一遍，不漏；已推过的 CVE 不会重复推。
+每天中午 12:00 抓一次（服务器时区必须是 `Asia/Shanghai`，否则 12 点会跑在别的时候）。
+`cron-run.sh` 固定传 `--days 1`，窗口就是最近 24 小时；**有新增才推送**，
+无新增且各数据源正常时只刷新看板时间戳、不发消息（`state.db` 水位照常推进）。
+
+一天只跑一次意味着：若某天整轮失败（退出码非 0），水位不推进，次日窗口仍是最近 24h，
+中间那 24 小时的漏洞不会自动补 —— 需要时用 `--since` 回填一次即可。
 
 **为什么必须在服务器上跑**：自建应用配了可信 IP 白名单，本机出口 IP 调 `message/send`
 会被拒（`errcode 60020`）。服务器在名单内，本机不在。本机想直发只能走 `channel: cli`（wecom-cli）。
