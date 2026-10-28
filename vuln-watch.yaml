@@ -186,7 +186,7 @@ wecom:
   chat_id_env: WECOM_CHAT_ID
   webhook_env: WECOM_VULN_WEBHOOK   # 仅 channel=webhook 时需要
   # 自建应用通道：凭据从环境变量或该文件读，绝不写进本文件
-  # 服务器上由 /opt/vuln-watch/.env 注入 WECOM_APP_ENV 指向凭据文件
+  # 服务器上由部署配置（VW_WECOM_APP_ENV）注入 WECOM_APP_ENV 指向凭据文件
   app_env_file: ""
   app_env_file_env: WECOM_APP_ENV
   touser: ""                # 留空则用 WX_TOUSER 环境变量，再退化为自动解析授权人

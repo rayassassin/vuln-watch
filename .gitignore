@@ -16,8 +16,11 @@ venv/
 # macOS
 .DS_Store
 
-# 本地覆盖配置（放自己的 webhook / chat_id，不入库）
+# 本机覆盖配置（放自己的 webhook / chat_id，不入库）
 vuln-watch.local.yaml
+
+# 部署配置：含主机、账号、密码，只存在本机 ~/.config/vuln-watch/ 或临时 export
+deploy.env
 
 # 网页运行时数据：由 collect.py 现场生成，服务器/本机各自维护
 web/data.json

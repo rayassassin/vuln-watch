@@ -1,0 +1,61 @@
+#!/usr/bin/expect -f
+# 通用远程执行 / 传输助手（发布流水线内部使用）。
+#
+# 设计原则：连接信息只从环境变量读，仓库里不出现任何主机、账号、密码、路径。
+#   VW_SSH_HOST / VW_SSH_PORT / VW_SSH_USER / VW_SSH_PASS
+#
+# 用法：
+#   expect -f remote_put.exp run "<远程命令>"
+#   expect -f remote_put.exp put <本地文件> <远程绝对路径>
+#   expect -f remote_put.exp get <远程绝对路径> <本地路径>
+#
+# 退出码透传远程命令的退出码，方便调用方据此判断成败。
+
+set timeout 900
+set mode [lindex $argv 0]
+
+foreach v {VW_SSH_HOST VW_SSH_PORT VW_SSH_USER VW_SSH_PASS} {
+    if {![info exists env($v)]} {
+        puts ">>> 缺少环境变量 $v"
+        exit 3
+    }
+}
+
+set pass $env(VW_SSH_PASS)
+set host $env(VW_SSH_HOST)
+set port $env(VW_SSH_PORT)
+set user $env(VW_SSH_USER)
+set opts [list -o StrictHostKeyChecking=no \
+              -o UserKnownHostsFile=/dev/null \
+              -o PreferredAuthentications=password \
+              -o PubkeyAuthentication=no \
+              -o ConnectTimeout=20]
+
+switch -- $mode {
+    run {
+        if {[llength $argv] < 2} { puts ">>> run 需要一条远程命令"; exit 2 }
+        spawn ssh {*}$opts -p $port $user@$host [lindex $argv 1]
+    }
+    put {
+        if {[llength $argv] < 3} { puts ">>> put 需要 <本地文件> <远程路径>"; exit 2 }
+        spawn scp {*}$opts -P $port [lindex $argv 1] $user@$host:[lindex $argv 2]
+    }
+    get {
+        if {[llength $argv] < 3} { puts ">>> get 需要 <远程路径> <本地路径>"; exit 2 }
+        spawn scp {*}$opts -P $port $user@$host:[lindex $argv 1] [lindex $argv 2]
+    }
+    default {
+        puts ">>> 未知模式 $mode（run / put / get）"
+        exit 2
+    }
+}
+
+# 首次连接要应答密码提示；scp 有时会重复提示，exp_continue 兜住
+expect {
+    -re "(?i)password" { send -- "$pass\r"; exp_continue }
+    -re "(?i)are you sure you want to continue" { send -- "yes\r"; exp_continue }
+    eof
+}
+
+catch wait result
+exit [lindex $result 3]

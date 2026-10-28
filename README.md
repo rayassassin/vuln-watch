@@ -129,29 +129,33 @@ python collect.py --since 2026-01-01
 **5. 企微 2048 字节限制。**
 `split_by_bytes()` 按行切分，`max_bytes` 默认 6000。注意两个限制不是一回事：CLI 通道单条上限 20480 字节，群机器人 webhook 才是 2048。
 
-## 部署到云服务器
+## 部署到服务器
 
-生产跑在一台Linux 服务器上，目录 `/opt/vuln-watch`。
+生产跑在一台 Linux 服务器上，安装目录默认 `/opt/vuln-watch`（换目录就设 `VW_BASE`）。
 
 ```bash
 # 本机改完代码、提交后，一条命令同步
 python3 scripts/deploy.py
 ```
 
-同步逻辑：`git archive` 只打包已跟踪文件 → 上传到中转目录 → 解包到 `/opt/vuln-watch`
+同步逻辑：`git archive` 只打包已跟踪文件 → 上传中转目录 → 解包到安装目录
 → 写 `.version`（当前 commit sha）→ 重新生成 `run.sh`。
 **服务器上的 `state.db`、`.env`、`logs/` 一律不动**，所以同步不会把已推送水位冲掉。
+
+**连接信息不进仓库**：主机、端口、账号、密码、远程目录全部从环境变量或本机凭据文件读，
+复制 `scripts/deploy.env.example` 到 `~/.config/vuln-watch/deploy.env` 并 `chmod 600` 即可。
+传输靠 `scripts/remote_put.exp`（通用 expect 助手，只从环境变量取凭据）。
 
 服务器侧文件：
 
 | 文件 | 作用 |
 |---|---|
-| `run.sh` | 启动包装，固定 `WECOM_CHANNEL=app`，收件人从既有 `feeds.json` 取 |
+| `run.sh` | 启动包装，固定 `WECOM_CHANNEL=app`，收件人由 `VW_WECOM_FEEDS` 指定 |
 | `scripts/cron-run.sh` | cron 入口：落日志 + 失败告警 |
 | `logs/cron-YYYYMMDD.log` | 每天的运行日志 |
 | `.version` | 当前部署的 commit |
 
-定时任务（服务器 crontab）：
+定时任务（服务器 crontab，路径按你的安装目录改）：
 
 ```
 0 0,12 * * * /opt/vuln-watch/scripts/cron-run.sh
@@ -235,7 +239,8 @@ python3 scripts/publish_pages.py --method git   # 应急：退回 git push
 1. GitHub → Settings → Developer settings → Personal access tokens → **Fine-grained tokens**
 2. Repository access 只勾 `vuln-watch`（就这一项），权限给 **Contents: Read and write**
    （想让它自动启用 Pages 再补 **Pages: Read and write**）
-3. 服务器上落盘：`echo '<token>' > /opt/vuln-watch/.pages_token && chmod 600 /opt/vuln-watch/.pages_token`
+3. 服务器上落盘：`echo '<token>' > /opt/vuln-watch/.pages_token && chmod 600 ...`
+   （路径可用 `VW_PAGES_TOKEN_FILE` 改，见 `scripts/deploy.env.example`）
 
 没有这个文件时，cron 跳过发布，并发一条 **🟡 看板未更新** 提示（一天最多一次，
 修好后自动停止），**不影响日报推送**。

@@ -1082,7 +1082,7 @@ def render_degraded(stats: dict, cfg: dict | None = None) -> str:
     lines += [
         "",
         "修复网络或代理后手动补跑一次：",
-        "`/opt/vuln-watch/run.sh --days 1`",
+        "`./run.sh --days 1`",
     ]
     link = _dashboard_link(cfg)
     if link:

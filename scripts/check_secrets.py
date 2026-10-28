@@ -51,6 +51,11 @@ RULES: list[tuple[str, str, str]] = [
     # 内网痕迹
     ("公网 IP", r"\b(?:(?:25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|1?\d?\d)\b", "具体 IP 地址"),
     ("本机绝对路径", r"/Users/[A-Za-z0-9._-]+/|/home/[A-Za-z0-9._-]+/|[A-Za-z]:\\\\Users\\\\", "含用户名的本机路径"),
+    # 本仓库是公开的：别的项目的服务器目录、本机工具链结构都不该外泄
+    ("跨项目服务器路径", r"/opt/(?!vuln-watch)[a-z][a-z0-9-]{2,}/", "其它项目在服务器上的目录"),
+    ("本机工具链路径", r"/Users/[A-Za-z0-9._-]+/(?:WorkBuddy|\.workbuddy)|\.workbuddy/(?:secrets|tools)", "本机工具链/密钥目录"),
+    # 企微应用 agentid 是具体数字，和变量名要区分开
+    ("企微 agentid 值", r"(?i)agentid\s*[:=]\s*['\"]?\d{4,}", "企微应用 agentid"),
 ]
 
 # 白名单：这些是文档/代码里必须出现的示例值或公开信息
@@ -71,6 +76,9 @@ ALLOW_PATTERNS = [
     r"qyapi\.weixin\.qq\.com/cgi-bin/webhook/send\?key=xxx",  # 文档占位符
     r"api_key_env",
     r"token_env",
+    # 文档里用的保留地址（RFC 5737 / RFC 2606），不是真实主机
+    r"\b(?:192\.0\.2|198\.51\.100|203\.0\.113)\.",
+    r"example\.(?:com|org|net)",
     # 只放行「明确是变量或占位符」的写法。这里曾经写成 \{?\$?\{?\w+\}?\}?，
     # 全部可选等于任何 Bearer xxx 都能过，等于没这条规则。
     r"Bearer (?:\$\{?\w+\}?|\{\w+\}|<\w+>)",
