@@ -309,6 +309,9 @@ def fetch_nvd_window(
     cur = start
     while cur < end:
         nxt = min(cur + timedelta(days=chunk_days), end)
+        # 尾部不足一天就别单独再查一次了：12 个通道各多一次请求，白等 7 秒
+        if (end - nxt).total_seconds() < 86400:
+            nxt = end
         fn = fetch_nvd_by_cna if kind == "cna" else fetch_nvd_keyword
         out.extend(fn(
             target, cur, nxt, cfg, date_field=date_field,
@@ -548,16 +551,23 @@ GH_ECO_MAP = {
 
 def fetch_github_advisories(
     ecosystems: list[str], since: datetime, cfg: dict, max_pages: int = 3,
+    watch_names: set[str] | None = None,
 ) -> list[dict]:
     """
     GitHub Advisory：匿名可调但限流 60 次/小时，配 GITHUB_TOKEN 提到 5000。
     published 参数要传日期区间 "A..B"，不是 ">=A"。
-    max_pages：日常增量 3 页（300 条）够用；一年回填要放大。
+    max_pages：日常增量 3 页（300 条）够用；回填要放大。
+
+    watch_names：资产清单里的包坐标。命中即代表"你真的在用受影响版本"，
+    这条判断以前拿不到——因为没取包名，组件名全靠标题猜，Spring/Jackson
+    这类包的漏洞就被记成了"无组件"。advisory 自带的 vulnerabilities[].package
+    正好补上这个洞。
     """
     token = os.environ.get("GITHUB_TOKEN", "").strip()
     headers = {"Accept": "application/vnd.github+json"}
     if token:
         headers["Authorization"] = f"Bearer {token}"
+    watch = {w for w in (watch_names or set()) if w}
 
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     published = f"{since.strftime('%Y-%m-%d')}..{today}"
@@ -580,12 +590,19 @@ def fetch_github_advisories(
             if not isinstance(batch, list) or not batch:
                 break
             for a in batch:
+                vulns = a.get("vulnerabilities") or []
+                pkg, rng = "", ""
+                if vulns:
+                    pkg = ((vulns[0].get("package") or {}).get("name") or "").strip()
+                    rng = (vulns[0].get("vulnerable_version_range") or "").strip()
                 items.append({
                     "id": a.get("ghsa_id", ""), "cve": (a.get("cve_id") or "").upper(),
                     "title": (a.get("summary") or "")[:180],
                     "cvss": float((a.get("cvss") or {}).get("score") or 0), "cvss_exact": True,
                     "source": f"GitHub/{gh_eco}", "url": a.get("html_url", ""),
                     "published": (a.get("published_at") or "")[:10],
+                    "asset": pkg, "affected_range": rng,
+                    "exact_match": bool(pkg) and pkg in watch,
                 })
             if len(batch) < 100:
                 break
@@ -1479,14 +1496,20 @@ def run_backfill(cfg: dict, days: int, since_date: str = "") -> int:
     # 4) GitHub Advisory：按生态全量（java/python/vue/php 的主力来源）
     ecos = _gh_ecosystems(cfg)
     log(f"GitHub Advisory 按生态全量拉取：{', '.join(ecos)}")
-    raw.extend(fetch_github_advisories(ecos, start, cfg, max_pages=int(bf.get("gh_max_pages", 12))))
+    raw.extend(fetch_github_advisories(
+        ecos, start, cfg, max_pages=int(bf.get("gh_max_pages", 12)),
+        watch_names={a.get("name") for a in assets_all if a.get("name")},
+    ))
 
     total_scanned = len(raw)
     log(f"原始采集 {total_scanned} 条，开始富化与打分 ...")
 
     # 5) KEV + EPSS
     kev = fetch_cisa_kev(cfg)
-    cves = sorted({i["cve"].upper() for i in raw if i.get("cve")})
+    # EPSS 只查够格的：低于 6.5 分的一律进不了日报也进不了全景页（回填门槛 7.0），
+    # 全查反而把 9517 个 CVE 变成 96 次请求、白等三分钟。
+    cves = sorted({i["cve"].upper() for i in raw
+                   if i.get("cve") and (i.get("cvss") or 0) >= 6.5})
     epss = fetch_epss(cves, cfg)
 
     items = normalize_and_score(raw, kev, epss, cfg_bf, keywords, excludes)
@@ -1593,14 +1616,20 @@ def main() -> int:
     raw.extend(fetch_packagist_update(int(since.timestamp()), cfg))
 
     # 4) GitHub Advisory：按生态全量，而不是只看资产清单出现过的生态
-    raw.extend(fetch_github_advisories(_gh_ecosystems(cfg), since, cfg))
+    raw.extend(fetch_github_advisories(
+        _gh_ecosystems(cfg), since, cfg,
+        watch_names={a.get("name") for a in assets_all if a.get("name")},
+    ))
 
     total_scanned = len(raw)
     log(f"原始采集 {total_scanned} 条，开始归一化打分 ...")
 
     # 5) 富化：KEV + EPSS
     kev = fetch_cisa_kev(cfg)
-    cves = sorted({i["cve"].upper() for i in raw if i.get("cve")})
+    # EPSS 只查够格的：低于 6.5 分的一律进不了日报也进不了全景页（回填门槛 7.0），
+    # 全查反而把 9517 个 CVE 变成 96 次请求、白等三分钟。
+    cves = sorted({i["cve"].upper() for i in raw
+                   if i.get("cve") and (i.get("cvss") or 0) >= 6.5})
     epss = fetch_epss(cves, cfg)
 
     items = normalize_and_score(
