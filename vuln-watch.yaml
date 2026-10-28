@@ -106,6 +106,21 @@ policy:
     P1: 4
     P2: 4
 
+# ---------- 6. 历史回填：给全景页灌基数 ----------
+# 只影响 web/data.json 的内容，不影响日报推送。
+# 命令：python collect.py --backfill 365
+backfill:
+  days: 365                # 默认回填窗口
+  min_cvss: 7.0            # 回填收录门槛，比日报宽松就调这里
+  # 全景页按 CNA 全量收录（订阅了 Apache/Oracle/PHP 就算你的关注范围），
+  # 不再过关键词粗筛——否则一年只剩几十条，页面没有"全景"的用处。
+  # 想让全景也只显示中间件相关，改成 true。
+  keyword_filter: false
+  nvd_chunk_days: 100      # NVD 单次查询上限 120 天，切 100 留余量
+  gh_max_pages: 12         # GitHub Advisory 分页上限（一年数据 3 页不够）
+  max_entries: 6000        # 兜底上限：Oracle 季度批量公告可能一次灌上千条
+  retention_days: 400      # data.json 保留天数，比一年略宽
+
 wecom:
   # cli      —— 走已授权的 wecom-cli 机器人（本机用）
   # app      —— 走自建应用 message/send（服务器用，不需要 wecom-cli）

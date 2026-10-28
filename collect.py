@@ -161,30 +161,58 @@ def fetch_epss(cve_ids: list[str], cfg: dict) -> dict[str, float]:
     return out
 
 
-def fetch_nvd_by_cna(cna: str, since: datetime, until: datetime, cfg: dict) -> list[dict]:
+def fetch_nvd_by_cna(
+    cna: str, since: datetime, until: datetime, cfg: dict,
+    date_field: str = "lastMod", page_size: int = 200, max_pages: int = 30,
+) -> list[dict]:
     """
-    按 CNA（CVE 编号机构）拉取某厂商全产品线的 CVE。
-    这是本工具最省事的一招：一个 sourceIdentifier 覆盖一整个厂商生态。
+    按 CNA（CVE 编号机构）拉取某厂商全产品线的 CVE，带分页。
+
+    date_field 决定用哪个时间维度筛：
+      - "lastMod"   —— 日常增量巡检用。窗口只有 1 天，落在这个区间的必然是新的。
+      - "published" —— 历史回填必须用这个。lastMod 会把早年漏洞因为"改了句描述"
+                        也算进最近一年，回填出来就变成一堆 2019 年的东西。
     """
     api_key = os.environ.get(cfg["nvd"]["api_key_env"], "").strip()
     headers = {"apiKey": api_key} if api_key else {}
     # NVD 要求 ISO8601 带时区，用 UTC
     fmt = "%Y-%m-%dT%H:%M:%S.000+00:00"
-    params = {
-        "sourceIdentifier": cna,
-        "lastModStartDate": since.astimezone(timezone.utc).strftime(fmt),
-        "lastModEndDate": until.astimezone(timezone.utc).strftime(fmt),
-        "resultsPerPage": 200,
-    }
-    log(f"拉取 NVD CNA={cna} ...")
-    try:
-        data = http_get("https://services.nvd.nist.gov/rest/json/cves/2.0", params=params, headers=headers, timeout=60).json()
-    except Exception as exc:  # noqa: BLE001
-        log(f"  ! NVD 失败 {cna}：{exc}")
-        return []
+    s_str = since.astimezone(timezone.utc).strftime(fmt)
+    e_str = until.astimezone(timezone.utc).strftime(fmt)
+    params: dict[str, Any] = {"sourceIdentifier": cna, "resultsPerPage": page_size}
+    if date_field == "published":
+        params["pubStartDate"], params["pubEndDate"] = s_str, e_str
+    else:
+        params["lastModStartDate"], params["lastModEndDate"] = s_str, e_str
+
+    # 无 key 限流 5 次/30 秒，有 key 50 次/30 秒。分页会连发多个请求，必须礼让。
+    nap = 1.0 if api_key else 7.0
+    log(f"拉取 NVD CNA={cna} [{since.strftime('%Y-%m-%d')} → {until.strftime('%Y-%m-%d')}] ...")
+
+    raw: list[dict] = []
+    total: int | None = None
+    start = 0
+    for page in range(max_pages):
+        params["startIndex"] = start
+        try:
+            data = http_get(
+                "https://services.nvd.nist.gov/rest/json/cves/2.0",
+                params=params, headers=headers, timeout=90,
+            ).json()
+        except Exception as exc:  # noqa: BLE001
+            log(f"  ! NVD 失败 {cna} p{page + 1}：{exc}")
+            break
+        if total is None:
+            total = int(data.get("totalResults", 0) or 0)
+        batch = data.get("vulnerabilities", []) or []
+        raw.extend(batch)
+        start += len(batch)
+        if not batch or start >= (total or 0):
+            break
+        time.sleep(nap)
 
     items: list[dict] = []
-    for wrap in data.get("vulnerabilities", []):
+    for wrap in raw:
         cve = wrap.get("cve", {})
         cve_id = cve.get("id", "")
         desc = next((d["value"] for d in cve.get("descriptions", []) if d.get("lang") == "en"), "")
@@ -216,10 +244,30 @@ def fetch_nvd_by_cna(cna: str, since: datetime, until: datetime, cfg: dict) -> l
             "cisa_due": cve.get("cisaActionDue", "") or "",
         })
 
-    log(f"  拿到 {len(items)} 条（{cna}）")
+    log(f"  拿到 {len(items)} 条（{cna}，原始 {len(raw)}/{total or '?'}）")
     if not api_key:
         time.sleep(7)  # 无 key 限流 5 req/30s，礼貌等待
     return items
+
+
+def fetch_nvd_window(
+    cna: str, start: datetime, end: datetime, cfg: dict,
+    date_field: str = "published", chunk_days: int = 100,
+) -> list[dict]:
+    """
+    回填用：NVD 单次查询的时间区间不能超过 120 天，这里按 100 天切段再合并。
+    用 100 而不是 120，是给时区和 NVD 内部取整留余量。
+    """
+    out: list[dict] = []
+    cur = start
+    while cur < end:
+        nxt = min(cur + timedelta(days=chunk_days), end)
+        out.extend(fetch_nvd_by_cna(
+            cna, cur, nxt, cfg, date_field=date_field,
+            page_size=2000, max_pages=20,
+        ))
+        cur = nxt
+    return out
 
 
 def fetch_osv_asset(asset: dict, lookback_days: int, error_sink: list | None = None) -> list[dict]:
@@ -450,10 +498,13 @@ GH_ECO_MAP = {
 }
 
 
-def fetch_github_advisories(ecosystems: list[str], since: datetime, cfg: dict) -> list[dict]:
+def fetch_github_advisories(
+    ecosystems: list[str], since: datetime, cfg: dict, max_pages: int = 3,
+) -> list[dict]:
     """
     GitHub Advisory：匿名可调但限流 60 次/小时，配 GITHUB_TOKEN 提到 5000。
     published 参数要传日期区间 "A..B"，不是 ">=A"。
+    max_pages：日常增量 3 页（300 条）够用；一年回填要放大。
     """
     token = os.environ.get("GITHUB_TOKEN", "").strip()
     headers = {"Accept": "application/vnd.github+json"}
@@ -469,7 +520,7 @@ def fetch_github_advisories(ecosystems: list[str], since: datetime, cfg: dict) -
         if not gh_eco:
             continue
         page = 1
-        while page <= 3:  # 最多 3 页 300 条，够覆盖一个窗口期
+        while page <= max_pages:
             try:
                 resp = http_get(cfg["feeds"]["github_advisories"], params={
                     "ecosystem": gh_eco, "per_page": 100, "page": page, "published": published,
@@ -557,6 +608,8 @@ def normalize_and_score(
         if k:
             v["kev_added"] = k.get("kev_added", "")
             v["ransomware"] = k.get("ransomware", "")
+            v["kev_vendor"] = k.get("vendor", "")
+            v["kev_product"] = k.get("product", "")
         v["epss"] = epss.get(cve, 0.0)
 
         # 影响分析：被利用后会造成什么后果、需要什么攻击条件
@@ -655,6 +708,16 @@ TITLE_HINTS = [
     ("jenkins", "Jenkins"), ("gitlab", "GitLab"), ("zookeeper", "ZooKeeper"),
 ]
 
+# CNA 归属映射：NVD 条目没有资产坐标也没有明显标题特征时的最后兜底
+CNA_VENDOR = {
+    "security@apache.org": "Apache",
+    "security@php.net": "PHP",
+    "secalert_us@oracle.com": "Oracle",
+}
+
+# 分级严重度排序，数字越小越严重。合并同一 CVE 的多份记录时取更严重的一级
+LEVEL_RANK = {"P0": 0, "P1": 1, "P2": 2}
+
 
 def _component_name(v: dict) -> str:
     """给出条目的组件可读名，取不到就返回空串，不硬凑。"""
@@ -670,6 +733,16 @@ def _component_name(v: dict) -> str:
     for key, name in TITLE_HINTS:
         if key in title:
             return name
+    # 再退一层：KEV 里有官方厂商/产品名，比标题猜得准
+    if v.get("kev_vendor"):
+        prod = v.get("kev_product") or ""
+        return f"{v['kev_vendor']} {prod}".strip()
+    # 最后退到 CNA 归属：至少让人知道这是 Apache 还是 Oracle 的洞
+    for src in v.get("sources", []):
+        if src.startswith("NVD/CNA:"):
+            vendor = CNA_VENDOR.get(src.split("NVD/CNA:", 1)[1], "")
+            if vendor:
+                return vendor
     return ""
 
 
@@ -820,80 +893,155 @@ def render_degraded(stats: dict) -> str:
     return "\n".join(lines)
 
 
-def write_web_data(items: list[dict], stats: dict, cfg: dict) -> None:
+def _load_web_data(out_file: Path) -> dict:
     """
-    把本轮命中条目与统计导出为 web/data.json，供前端页面读取展示。
-
-    设计原则：
-    - 纯只读旁路：不碰推送、不碰 state.db 水位，网页挂了不影响日报。
-    - 附带组件可读名与分级语义色，前端直接消费，无需二次映射。
-    - 保留历史累积：把本次条目追加进按天分组的清单，网页能展示多日趋势，
-      而不是只看今天一条。
+    读取既有网页数据，兼容早期"按天数组"格式，
+    避免升级格式时把已经攒下的历史冲掉。
     """
-    import json as _json
+    if not out_file.exists():
+        return {"entries": []}
+    try:
+        raw = json.loads(out_file.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {"entries": []}
+    if isinstance(raw, list):          # 旧格式：每天一个快照
+        merged: list[dict] = []
+        for day in raw:
+            merged.extend(day.get("entries") or [])
+        return {"entries": merged}
+    if isinstance(raw, dict):
+        return raw
+    return {"entries": []}
 
+
+def _web_entry(v: dict) -> dict:
+    """把内部条目压成前端消费的行。只留页面要用的字段，一年数据量不小。"""
+    return {
+        "cve": v.get("cve") or v.get("key", ""),
+        "level": v.get("level", ""),
+        "cvss": round(v.get("cvss", 0.0), 1),
+        "cvss_exact": bool(v.get("cvss_exact")),
+        "kev": bool(v.get("kev")),
+        "epss": round(v.get("epss", 0.0), 4),
+        "ransomware": v.get("ransomware", ""),
+        "impact": (v.get("impact") or "")[:120],
+        "attack_cond": (v.get("attack_cond") or "")[:120],
+        "affected_range": (v.get("affected_range") or "")[:120],
+        "component": _component_name(v),
+        "title": (v.get("title") or "")[:150],
+        "url": v.get("url", ""),
+        "sources": v.get("sources", []),
+        "exact_match": bool(v.get("exact_match")),
+        "published": (v.get("published") or "")[:10],
+    }
+
+
+def write_web_data(items: list[dict], stats: dict, cfg: dict, mode: str = "daily") -> None:
+    """
+    把条目导出为 web/data.json，供前端全景页读取。
+
+    格式 v2：单对象。entries 是扁平去重清单，daily 是按"发布日期"分桶的统计。
+    早先是"每天一个快照"的数组，回填一年会变成 365 个块、同一条漏洞还会在
+    多个块里重复；改成单清单后，跨天去重、按时间筛选、趋势聚合都直接得多。
+
+    与推送的关系：纯旁路，不碰 state.db 水位，也不影响日报发送。
+    """
     out_dir = Path(ROOT) / "web"
     out_dir.mkdir(parents=True, exist_ok=True)
     out_file = out_dir / "data.json"
 
-    # 读取既有历史，避免每次运行把旧数据冲掉
-    history: list[dict] = []
-    if out_file.exists():
-        try:
-            history = _json.loads(out_file.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            history = []
-
     now = datetime.now(timezone.utc)
     today = now.strftime("%Y-%m-%d")
+    old = _load_web_data(out_file)
 
-    # 去掉当日旧快照，用本轮最新结果覆盖，避免同一天多次跑产生重复
-    history = [h for h in history if h.get("date") != today]
+    # 以 CVE 为主键合并。同一条漏洞被回填和日常巡检都抓到时，保留信息更全的一份
+    book: dict[str, dict] = {}
+    for e in old.get("entries") or []:
+        key = (e.get("cve") or "").upper()
+        if key:
+            book[key] = e
 
-    entries = []
+    fresh = 0
     for v in items:
-        entries.append({
-            "cve": v.get("cve") or v.get("key", ""),
-            "level": v.get("level", ""),
-            "cvss": round(v.get("cvss", 0.0), 1),
-            "cvss_exact": bool(v.get("cvss_exact")),
-            "kev": bool(v.get("kev")),
-            "epss": round(v.get("epss", 0.0), 4),
-            "ransomware": v.get("ransomware", ""),
-            "impact": v.get("impact", ""),
-            "attack_cond": v.get("attack_cond", ""),
-            "affected_range": v.get("affected_range", ""),
-            "asset_version": v.get("asset_version", ""),
-            "component": _component_name(v),
-            "title": (v.get("title") or "")[:160],
-            "cisa_action": v.get("cisa_action", ""),
-            "url": v.get("url", ""),
-            "sources": v.get("sources", []),
-            "exact_match": bool(v.get("exact_match")),
-            "published": v.get("published", ""),
-        })
+        e = _web_entry(v)
+        key = (e["cve"] or "").upper()
+        if not key:
+            continue
+        prev = book.get(key)
+        if prev is None:
+            fresh += 1
+        else:
+            # 旧条目里有、新条目里缺的字段补回来（例如回填拿不到的版本范围）
+            for f, val in prev.items():
+                if not e.get(f) and val:
+                    e[f] = val
+            # 分级取更严重的那个：宁可多报一级，也别把 P0 降成 P2
+            if LEVEL_RANK.get(e.get("level"), 9) > LEVEL_RANK.get(prev.get("level"), 9):
+                e["level"] = prev["level"]
+        book[key] = e
 
-    history.append({
-        "date": today,
+    # 保留窗口：默认 400 天，比一年略宽，避免回填后旧数据瞬间消失
+    retention = int((cfg.get("backfill") or {}).get("retention_days", 400))
+    cutoff = (now - timedelta(days=retention)).strftime("%Y-%m-%d")
+    entries = [e for e in book.values() if not e.get("published") or e["published"] >= cutoff]
+    entries.sort(key=lambda e: (e.get("published") or "", e.get("cvss") or 0), reverse=True)
+
+    # 按发布日期分桶，供前端画趋势。
+    # 用发布日期而不是采集日，否则回填那天所有历史都会堆成一根柱子。
+    buckets: dict[str, dict] = {}
+    for e in entries:
+        d = e.get("published") or today
+        b = buckets.setdefault(d, {"date": d, "hit": 0, "p0": 0, "p1": 0, "p2": 0})
+        b["hit"] += 1
+        lv = e.get("level")
+        if lv in ("P0", "P1", "P2"):
+            b[lv.lower()] += 1
+
+    def count(lv: str) -> int:
+        return sum(1 for e in entries if e.get("level") == lv)
+
+    payload = {
+        "format": 2,
         "generated_at": now.isoformat(),
-        "scanned": stats.get("scanned", 0),
-        "hit": len(entries),
-        "p0": sum(1 for e in entries if e["level"] == "P0"),
-        "p1": sum(1 for e in entries if e["level"] == "P1"),
-        "p2": sum(1 for e in entries if e["level"] == "P2"),
+        "mode": mode,
+        "range": {
+            "from": entries[-1].get("published") if entries else "",
+            "to": entries[0].get("published") if entries else "",
+        },
+        "stats": {
+            "total": len(entries),
+            "p0": count("P0"),
+            "p1": count("P1"),
+            "p2": count("P2"),
+            "kev": sum(1 for e in entries if e.get("kev")),
+            "exact": sum(1 for e in entries if e.get("exact_match")),
+            "scanned": stats.get("scanned", 0),
+            "new_this_run": fresh,
+        },
+        "last_run": {
+            "date": today,
+            "at": now.isoformat(),
+            "mode": mode,
+            "hit": len(items),
+            "p0": sum(1 for v in items if v.get("level") == "P0"),
+            "p1": sum(1 for v in items if v.get("level") == "P1"),
+            "p2": sum(1 for v in items if v.get("level") == "P2"),
+        },
         "sources": stats.get("sources", []),
         "degraded": stats.get("degraded", []),
+        "daily": [buckets[d] for d in sorted(buckets)],
         "entries": entries,
-    })
-
-    # 只保留最近 30 天的历史，避免 JSON 无限膨胀
-    history = history[-30:]
+    }
 
     out_file.write_text(
-        _json.dumps(history, ensure_ascii=False, indent=2),
+        json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
         encoding="utf-8",
     )
-    log(f"网页数据已写入 web/data.json（{len(entries)} 条，累计 {len(history)} 天）")
+    size_kb = out_file.stat().st_size / 1024
+    log(
+        f"网页数据已写入 web/data.json（本轮 {len(items)} 条，新增 {fresh} 条，"
+        f"累计 {len(entries)} 条 / {len(buckets)} 天，{size_kb:.0f} KB）"
+    )
 
 
 def split_by_bytes(text: str, max_bytes: int) -> list[str]:
@@ -1089,10 +1237,114 @@ def push_wecom_app(text: str, cfg: dict) -> bool:
 
 # ---------------------------- 主流程 ----------------------------
 
+def run_backfill(cfg: dict, days: int) -> int:
+    """
+    一次性历史回填：把最近 N 天的漏洞灌进全景页，**不推送任何消息**。
+
+    两条刻意的设计：
+    1. 不写 state.db 水位、不 mark_seen。
+       mark_seen 尤其危险——回填会把整整一年的漏洞标成"已读"，
+       明天真有新漏洞时日常任务就当成旧的漏掉了。
+    2. 区间只取到"昨天 00:00"，今天产生的留给日常任务去推送。
+       这样回填和推送各管一段，既不重复也不漏。
+    """
+    bf = cfg.get("backfill") or {}
+    now = datetime.now(timezone.utc)
+    end = (now - timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+    start = end - timedelta(days=days)
+    log(f"历史回填区间：{start.strftime('%Y-%m-%d')} → {end.strftime('%Y-%m-%d')}（{days} 天，不推送）")
+
+    # 回填必须放宽两处策略，否则一年数据会被"只报新增"的规则全部过滤掉：
+    #   stale_days=0 → 关掉"发布超过 N 天丢弃"
+    #   keyword_watch → 全景页按 CNA 全量收录，不再做关键词粗筛
+    cfg_bf = dict(cfg)
+    cfg_bf["policy"] = {
+        **cfg["policy"],
+        "stale_days": 0,
+        "min_cvss": float(bf.get("min_cvss", cfg["policy"]["min_cvss"])),
+    }
+    use_keywords = bool(bf.get("keyword_filter", False))
+    keywords = cfg.get("keyword_watch", []) if use_keywords else []
+    excludes = cfg.get("keyword_exclude", []) if use_keywords else []
+
+    raw: list[dict] = []
+
+    # 1) NVD：按 CNA 拉厂商全量，按发布时间切段
+    chunk = int(bf.get("nvd_chunk_days", 100))
+    for cna in cfg["nvd"].get("cnas", []):
+        raw.extend(fetch_nvd_window(cna, start, end, cfg, date_field="published", chunk_days=chunk))
+
+    # 2) OSV：组件维度，回填窗口 = 整个区间
+    log("按组件清单查询 OSV（历史窗口）...")
+    osv_failed: list[str] = []
+    assets_all = cfg["osv"].get("assets", [])
+    for asset in assets_all:
+        hits = fetch_osv_asset(asset, days, osv_failed)
+        if hits:
+            log(f"  {asset['name']}@{asset.get('version') or '未指定'} → {len(hits)} 条")
+        raw.extend(hits)
+
+    # 3) Packagist PHP 生态
+    raw.extend(fetch_packagist_update(int(start.timestamp()), cfg))
+
+    # 4) GitHub Advisory
+    ecos = sorted({a.get("eco", "Maven") for a in assets_all})
+    raw.extend(fetch_github_advisories(ecos, start, cfg, max_pages=int(bf.get("gh_max_pages", 12))))
+
+    total_scanned = len(raw)
+    log(f"原始采集 {total_scanned} 条，开始富化与打分 ...")
+
+    # 5) KEV + EPSS
+    kev = fetch_cisa_kev(cfg)
+    cves = sorted({i["cve"].upper() for i in raw if i.get("cve")})
+    epss = fetch_epss(cves, cfg)
+
+    items = normalize_and_score(raw, kev, epss, cfg_bf, keywords, excludes)
+
+    # 兜底上限：正常一年约两千条，但 Oracle 季度批量公告一次能灌上千条，
+    # 万一某天数据源异常放大，别让 data.json 撑爆页面。
+    cap = int(bf.get("max_entries", 6000))
+    if len(items) > cap:
+        log(f"  ! 命中 {len(items)} 条超过上限 {cap}，按严重度截断（在野利用与高分优先）")
+        items = items[:cap]
+
+    log(f"回填命中 {len(items)} 条（P0 {sum(1 for i in items if i['level']=='P0')} / "
+        f"P1 {sum(1 for i in items if i['level']=='P1')} / "
+        f"P2 {sum(1 for i in items if i['level']=='P2')}）")
+
+    srcs: list[str] = []
+    for i in raw:
+        name = i["source"].split("/")[0].split(":")[0]
+        if name not in srcs:
+            srcs.append(name)
+    for extra in ("KEV", "EPSS"):
+        if extra not in srcs:
+            srcs.append(extra)
+
+    degraded: list[str] = []
+    if not kev:
+        degraded.append("CISA KEV 未取到，在野利用标记失效")
+    if osv_failed:
+        degraded.append(f"OSV {len(osv_failed)}/{len(assets_all)} 个组件失败")
+
+    stats = {
+        "scanned": total_scanned,
+        "since": start,
+        "until": end,
+        "sources": srcs,
+        "degraded": degraded,
+    }
+    write_web_data(items, stats, cfg_bf, mode="backfill")
+    log("回填完成。未推送任何消息，也未改动 state.db 水位。")
+    return 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="漏洞情报采集与企业微信推送")
     ap.add_argument("--dry-run", action="store_true", help="只采集打印，不推送")
     ap.add_argument("--days", type=int, default=0, help="覆盖回看天数")
+    ap.add_argument("--backfill", type=int, default=0, metavar="DAYS",
+                    help="历史回填：抓最近 N 天漏洞写入全景页，不推送、不动水位")
     ap.add_argument("--via", choices=["cli", "webhook", "app", "both"], default="",
                     help="推送通道，默认读配置 wecom.channel（可用环境变量 WECOM_CHANNEL 覆盖）")
     ap.add_argument("--no-commit", action="store_true",
@@ -1102,6 +1354,10 @@ def main() -> int:
 
     with open(args.config, encoding="utf-8") as f:
         cfg = yaml.safe_load(f)
+
+    # 回填是独立通道：不碰推送、不碰水位，跑完就退出
+    if args.backfill > 0:
+        return run_backfill(cfg, args.backfill)
 
     conn = init_db()
     now = datetime.now(timezone.utc)
