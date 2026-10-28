@@ -215,22 +215,37 @@ cd web && python3 -m http.server 8080      # http://localhost:8080
 **https://rayassassin.github.io/vuln-watch-pages/**
 
 ```bash
-python3 scripts/publish_pages.py          # 手动发一次
-python3 scripts/publish_pages.py --dry-run # 只组装不推送
+python3 scripts/publish_pages.py                # 手动发一次
+python3 scripts/publish_pages.py --dry-run      # 只校验文件，不联网
+python3 scripts/publish_pages.py --force        # 内容没变也重发
+python3 scripts/publish_pages.py --ensure-pages # 顺带确认 Pages 已启用
+python3 scripts/publish_pages.py --wait 120     # 等 Pages 构建完成
+python3 scripts/publish_pages.py --method git   # 应急：退回 git push
 ```
 
 服务器上 cron 会在采集成功后自动发布（`cron-run.sh` 里调用）。需要一次性配 token：
 
 1. GitHub → Settings → Developer settings → Personal access tokens → **Fine-grained tokens**
-2. Repository access 只勾 `vuln-watch-pages`，权限只给 **Contents: Read and write**
+2. Repository access 只勾 `vuln-watch-pages`，权限给 **Contents: Read and write**
+   （想让它自动启用 Pages 再补 **Pages: Read and write**）
 3. 服务器上落盘：`echo '<token>' > /opt/vuln-watch/.pages_token && chmod 600 /opt/vuln-watch/.pages_token`
 
-没有这个文件时，cron 只跳过发布并在日志写 `[skip]`，**不影响日报推送**。
+没有这个文件时，cron 跳过发布，并发一条 **🟡 看板未更新** 提示（一天最多一次，
+修好后自动停止），**不影响日报推送**。
 
-**为什么每次 force push 单个 commit**：data.json 有几 MB，一天两次正常提交，
-一年能把仓库历史撑到几个 GB。每次 orphan commit + `--force`，旧对象不进任何分支，
+**为什么走 Git Data API 而不是 git push**：data.json 4 MB，`clone → commit → push`
+要走 pack 协议加一条长连接。实测本机代理链路报 `Error in the HTTP2 framing layer` /
+`CONNECT tunnel failed 502`，云服务器到 github.com 报 `GnuTLS recv error (-110)`，
+两条链路都不可靠，重试只是赌运气。改成 `blobs → tree → commit → 改 ref` 之后
+是四五个独立的 HTTPS POST，单个请求几十 KB，失败只影响这一次请求。
+脚本只用标准库（`urllib` / `base64`），服务器 python3 不需要装 `requests`。
+
+**为什么每次是一个无父 commit**：一天两次、每次几 MB 的常规提交，一年能把仓库历史
+撑到几个 GB。每次新建 orphan commit 再 force 覆盖 ref，旧对象不进任何分支，
 GitHub 侧 GC 之后体积稳定在「一份快照」的量级。代价是没有历史版本可回溯，
 而这个页面本来也不需要——要历史去 state.db。
+
+另外脚本会记一个内容指纹 `.pages_state`，数据没变化就直接跳过，cron 不白跑一次 API。
 
 ### 回填 vs 日常，两条通道各管一段
 

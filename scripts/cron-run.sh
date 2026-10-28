@@ -7,6 +7,7 @@ BASE=/opt/vuln-watch
 LOGDIR="$BASE/logs"
 mkdir -p "$LOGDIR"
 LOG="$LOGDIR/cron-$(date +%Y%m%d).log"
+PAGES_STATE=ok      # ok / fail / skip，看板发布结果，用于决定要不要发提示
 
 {
     echo "=== $(date '+%F %T') start ==="
@@ -15,19 +16,56 @@ LOG="$LOGDIR/cron-$(date +%Y%m%d).log"
     rc=$?
     echo "=== $(date '+%F %T') exit $rc ==="
 
-    # 采集成功后把看板推到 GitHub Pages。
+    # 采集成功后把看板发布到 GitHub Pages（走 Git Data API，见 publish_pages.py）。
     # 这一步失败不能算日报失败：消息已经发出去了，页面晚一轮更新而已，
-    # 所以只记 warn 不改 rc，避免误触发「🔴 推送失败」告警。
+    # 所以不改 rc，避免误触发「🔴 推送失败」告警；但也不能静默，
+    # 下面单独发一条 🟡 提示，让人知道线上看板还停在上一版。
     if [ "$rc" -eq 0 ]; then
         if [ -f "$BASE/.pages_token" ]; then
             echo "=== $(date '+%F %T') publish pages ==="
             cd "$BASE" && GH_PAGES_TOKEN="$(cat "$BASE/.pages_token")" \
-                python3 scripts/publish_pages.py || echo "[warn] Pages 发布失败，看板未更新（不影响日报）"
+                python3 scripts/publish_pages.py || PAGES_STATE=fail
         else
-            echo "[skip] 未配置 $BASE/.pages_token，跳过 Pages 发布"
+            echo "[warn] 未配置 $BASE/.pages_token，本轮跳过看板发布"
+            PAGES_STATE=skip
         fi
     fi
 } >> "$LOG" 2>&1
+
+# 看板没更新要说一声，别让人以为页面挂了还没人管。
+# 一天只提醒一次（marker），修好之后第一次发布成功就清掉，不会变成刷屏。
+ALERT_MARK="$LOGDIR/.pages_alert"
+if [ "$PAGES_STATE" = "ok" ]; then
+    rm -f "$ALERT_MARK"
+elif [ "$rc" -eq 0 ] && [ ! -f "$ALERT_MARK" ]; then
+    python3 - "$PAGES_STATE" "$LOG" >> "$LOG" 2>&1 <<'PY'
+import sys
+sys.path.insert(0, "/opt/vuln-watch")
+import yaml, collect
+
+state, logfile = sys.argv[1], sys.argv[2]
+cfg = yaml.safe_load(open("/opt/vuln-watch/vuln-watch.yaml", encoding="utf-8"))
+
+if state == "skip":
+    why = ("服务器上没有 /opt/vuln-watch/.pages_token，"
+           "看板一直停在旧版本。\n"
+           "建一个 fine-grained PAT（仅 vuln-watch-pages，Contents: Read and write）"
+           "写进这个文件，chmod 600 即可。")
+else:
+    tail = ""
+    try:
+        lines = [l.rstrip() for l in open(logfile, encoding="utf-8", errors="ignore").read().splitlines() if l.strip()]
+        tail = "\n".join(lines[-5:])
+    except OSError:
+        pass
+    why = f"发布脚本报错，详情看日志尾部：\n{tail[:700]}"
+
+msg = f"**🟡 看板未更新**\n\n日报推送正常，但 Pages 发布没成功，线上还是上一版。\n\n{why}"
+ok = collect.push_wecom_app(msg, cfg)
+print(f"[alert] 看板告警推送{'成功' if ok else '失败'}")
+PY
+    : > "$ALERT_MARK"
+fi
 
 if [ "$rc" -ne 0 ]; then
     python3 - "$LOG" >> "$LOG" 2>&1 <<'PY'
