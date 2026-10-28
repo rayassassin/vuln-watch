@@ -179,6 +179,11 @@ web:
   public_url: "https://rayassassin.github.io/vuln-watch/"
   backup_url: ""    # 例：http://你的域名/（备案前服务器 80/8080 从公网不可达，先留空）
 
+  # 首屏轻量包（web/data-lite.json）里带多少条最近漏洞。
+  # 全量 4 MB 在国内链路上常常几十秒甚至拉不完，页面先用轻量包秒出内容，
+  # 再后台拉全量替换。600 条 ≈ 300 KB，按每页 20 条算够翻 30 页。
+  lite_entries: 600
+
 wecom:
   # cli      —— 走已授权的 wecom-cli 机器人（本机用）
   # app      —— 走自建应用 message/send（服务器用，不需要 wecom-cli）

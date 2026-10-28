@@ -38,7 +38,7 @@ import publish_pages as pp  # noqa: E402  复用 api/blob sha 口径，保证与
 ROOT = Path(__file__).resolve().parent.parent
 WEB = ROOT / "web"
 LOCAL_PORTS = (80, 8080)
-GH_PAGES_KINDS = ("index.html", "data.json")
+GH_PAGES_KINDS = ("index.html", "data.json", "data-lite.json")
 
 
 # ---------------------------------------------------------------- 小工具

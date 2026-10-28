@@ -1291,14 +1291,31 @@ def write_web_data(items: list[dict], stats: dict, cfg: dict, mode: str = "daily
     # 页面现在由 nginx 容器直接挂载这个目录对外服务，若边写边被读，
     # 4 MB 的 JSON 会读到半截，前端 JSON.parse 直接报错白屏。
     # os.replace 在同一文件系统上是原子的，读到的要么是旧版要么是新版。
-    blob = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
-    tmp_file = out_dir / ".data.json.tmp"
-    tmp_file.write_text(blob, encoding="utf-8")
-    os.replace(tmp_file, out_file)
-    size_kb = out_file.stat().st_size / 1024
+    def _emit(path: Path, data: dict) -> int:
+        blob = json.dumps(data, ensure_ascii=False, separators=(",", ":"))
+        tmp = out_dir / f".{path.name}.tmp"
+        tmp.write_text(blob, encoding="utf-8")
+        os.replace(tmp, path)
+        return len(blob.encode("utf-8"))
+
+    size_b = _emit(out_file, payload)
+
+    # 首屏轻量包 data-lite.json：统计 + 趋势 + 最近 N 条，约 300 KB。
+    # 为什么需要它：全量 4 MB 在国内链路上经常几十秒，甚至「连上了不给数据」，
+    # 浏览器就一直挂着，用户看到的是空白或误导性的空态。轻量包让首屏几百毫秒
+    # 就能出内容，前端再后台拉全量替换；全量拉不动也只是少了几千条历史，
+    # 不是白屏。entries 已按发布日期倒序，所以前 N 条就是最新的一批。
+    lite_n = int((cfg.get("web") or {}).get("lite_entries") or 600)
+    lite = dict(payload)
+    lite["lite"] = True
+    lite["total_entries"] = len(entries)
+    lite["entries"] = entries[:lite_n]
+    lite_b = _emit(out_dir / "data-lite.json", lite)
+
     log(
         f"网页数据已写入 web/data.json（本轮 {len(items)} 条，新增 {fresh} 条，"
-        f"累计 {len(entries)} 条 / {len(buckets)} 天，{size_kb:.0f} KB）"
+        f"累计 {len(entries)} 条 / {len(buckets)} 天，{size_b / 1024:.0f} KB）；"
+        f"首屏包 {len(lite['entries'])} 条 / {lite_b / 1024:.0f} KB"
     )
 
 

@@ -507,7 +507,7 @@ const RANGES = [[7, "近 7 天"], [30, "近 30 天"], [90, "近 90 天"], [365, 
 const $ = (s) => document.querySelector(s);
 
 let DATA = { entries: [], daily: [], stats: {}, sources: [], degraded: [], range: {}, last_run: null };
-let state = { range: 0, level: "all", flags: new Set(), comps: new Set(), search: "", sort: "newest", view: "table", page: 1 };
+let state = { range: 0, level: "all", flags: new Set(), comps: new Set(), search: "", sort: "newest", view: "table", page: 1, rangeUser: false };
 
 function esc(s) {
   return (s || "").replace(/[&<>"']/g, c => ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;" }[c]));
@@ -715,12 +715,17 @@ function renderStats(list) {
   const p1 = src.filter(e => e.level === "P1").length;
   const kev = src.filter(e => e.kev).length;
   const exact = src.filter(e => e.exact_match).length;
-  const st = DATA.stats || {};
+  // 只拿到轻量包时，卡片上的数字是"最近 N 条"的，不是全库：
+  // 明确标出总量，别让人以为漏洞从 8090 掉到 600 了
+  const total = DATA.total_entries || DATA.entries.length;
+  const liteOnly = loadState.lite && !loadState.full;
+  const footRange = DATA.range && DATA.range.from
+    ? `${DATA.range.from} → ${DATA.range.to}` : "等待采集";
   $("#stats").innerHTML = `
     <div class="stat">
       <div class="stat-label">收录漏洞</div>
-      <div class="stat-value">${src.length}</div>
-      <div class="stat-foot">${DATA.range && DATA.range.from ? `${DATA.range.from} → ${DATA.range.to}` : "等待采集"}</div>
+      <div class="stat-value">${liteOnly ? total : src.length}</div>
+      <div class="stat-foot">${liteOnly ? `全库 ${total} 条 · 已加载最近 ${src.length} 条` : footRange}</div>
     </div>
     <div class="stat accent-red">
       <div class="stat-label">立即处置 P0</div>
@@ -741,8 +746,13 @@ function renderStats(list) {
   const deg = DATA.degraded || [];
   const degHtml = deg.length
     ? `<div class="warn-bar">⚠️ ${deg.map(esc).join("；")}。结果可能不完整，请检查数据源。</div>` : "";
+  // 轻量态 / 全量失败的提示条，带重试入口 —— 别让人对着一个半截页面干等
+  const liteHtml = liteOnly
+    ? `<div class="warn-bar">📦 已加载最近 ${src.length} 条${loadState.err ? `，全量拉取失败（${esc(errText(loadState.err))}）` : "，全量数据后台加载中…"}
+       <a href="javascript:void(0)" onclick="load()" style="margin-left:8px;text-decoration:underline">重试</a></div>` : "";
   const srcChips = (DATA.sources || []).map(s => `<span class="src-chip">${esc(s)}</span>`).join("");
-  $("#degraded-box").innerHTML = degHtml + (srcChips ? `<div class="sources-bar">数据源　${srcChips}</div>` : "");
+  $("#degraded-box").innerHTML = liteHtml + degHtml +
+    (srcChips ? `<div class="sources-bar">数据源　${srcChips}</div>` : "");
 
   const gen = DATA.generated_at ? new Date(DATA.generated_at) : null;
   const mode = DATA.mode === "backfill" ? "历史回填" : "每日巡检";
@@ -791,6 +801,16 @@ function renderTrend() {
 }
 
 /* ---------- 加载 ---------- */
+// 两段式加载：先吃轻量的 data-lite.json（约 300 KB，最近 600 条），
+// 页面立刻有内容；再后台拉 4 MB 全量，成功后静默替换。
+// 全量在国内链路上经常几十秒甚至中途断，旧版直接 fetch("data.json") 会一直挂着，
+// 用户看到的就是空白或"暂无数据"。现在最坏情况也只是少了几千条历史。
+const LITE_URL = "data-lite.json";
+const FULL_URL = "data.json";
+
+// 加载状态：lite=当前显示的是轻量包，full=全量已到位，err=全量失败原因
+let loadState = { lite: false, full: false, err: null, painted: false };
+
 function normalize(raw) {
   // 兼容早期"按天数组"格式
   if (Array.isArray(raw)) {
@@ -802,33 +822,99 @@ function normalize(raw) {
   return raw || { entries: [] };
 }
 
-async function load() {
-  try {
-    const resp = await fetch("data.json", { cache: "no-store" });
-    if (!resp.ok) throw new Error("HTTP " + resp.status);
-    DATA = normalize(await resp.json());
-    if (!Array.isArray(DATA.entries)) DATA.entries = [];
+const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
-    // 有全年数据就默认看全年，避免上线后只显示 7 天
+// 带超时 + 重试的 JSON 拉取。
+// 超时是关键：浏览器对卡住的响应不设上限，用户能等到怀疑人生；
+// AbortController 到点掐断，才有机会重试。
+async function fetchJSON(url, { retries = 2, timeoutMs = 30000 } = {}) {
+  let lastErr = null;
+  for (let i = 0; i <= retries; i++) {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+    try {
+      // 重试时加时间戳，绕开中间层可能缓存住的半截响应
+      const u = i === 0 ? url : `${url}?r=${Date.now()}`;
+      const resp = await fetch(u, { cache: "no-store", signal: ctrl.signal });
+      if (!resp.ok) throw new Error("HTTP " + resp.status);
+      return await resp.json();
+    } catch (e) {
+      lastErr = e;
+      if (i < retries) await sleep(700 * (i + 1));
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+  throw lastErr || new Error("未知错误");
+}
+
+function errText(e) {
+  if (!e) return "未知错误";
+  if (e.name === "AbortError") return "请求超时";
+  return e.message || String(e);
+}
+
+function applyData(raw, fromLite) {
+  DATA = normalize(raw);
+  if (!Array.isArray(DATA.entries)) DATA.entries = [];
+  if (fromLite) loadState.lite = true; else { loadState.full = true; loadState.lite = false; }
+}
+
+function paint() {
+  // 默认时间范围只在用户没手动选过时按数据重算：
+  // 轻量包只有最近几百条，会算成"近 30 天"；全量到位后要纠正成"近一年"
+  if (!state.rangeUser) {
     const hasFull = DATA.entries.some(e => (e.published || "") < cutoff(90));
     state.range = hasFull ? 365 : 30;
+  }
+  renderRangeChips();
+  renderLevelChips();
+  renderFlagChips();
+  renderCompChips();
+  render();
+  loadState.painted = true;
+}
 
-    renderRangeChips();
-    renderLevelChips();
-    renderFlagChips();
-    renderCompChips();
-    render();
-  } catch (err) {
-    $("#tbody").innerHTML = "";
-    $("#emptyState").innerHTML = `<div class="empty"><div class="big">📡</div>暂无数据<br><span style="font-size:13px">请先运行 <code>collect.py --backfill 365</code> 生成 data.json</span></div>`;
-    console.error("加载 data.json 失败：", err);
+function showLoadError(e) {
+  $("#updatedAt").innerHTML = `<span class="dot-live"></span>加载失败`;
+  $("#resultCount").textContent = "数据加载失败";
+  $("#emptyState").innerHTML = `<div class="empty">
+    <div class="big">📡</div>数据加载失败：${esc(errText(e))}
+    <br><span style="font-size:13px">这不是"没采集到数据"，是浏览器没把 data.json 拉下来</span>
+    <br><button class="btn-ghost" onclick="load()" style="margin-top:14px">重新加载</button></div>`;
+}
+
+async function load() {
+  loadState = { lite: false, full: false, err: null, painted: false };
+
+  // 第一段：轻量包。失败不致命（老部署可能没有这个文件），继续走全量
+  try {
+    applyData(await fetchJSON(LITE_URL, { retries: 1, timeoutMs: 20000 }), true);
+    paint();
+  } catch (e) {
+    console.warn("轻量包不可用，改走全量：", errText(e));
+  }
+
+  // 第二段：全量。成功后静默替换，筛选/页码/排序状态都保留
+  try {
+    applyData(await fetchJSON(FULL_URL, { retries: 2, timeoutMs: 90000 }), false);
+    paint();
+  } catch (e) {
+    console.error("全量 data.json 加载失败：", e);
+    loadState.err = e;
+    if (loadState.painted) {
+      render();   // 让统计区把"仅精简数据"的提示画出来
+    } else {
+      showLoadError(e);
+    }
   }
 }
 
 /* ---------- 事件 ---------- */
 $("#rangeChips").addEventListener("click", e => {
   const c = e.target.closest(".chip[data-range]"); if (!c) return;
-  state.range = Number(c.dataset.range); state.page = 1; renderRangeChips(); render();
+  state.range = Number(c.dataset.range); state.page = 1; state.rangeUser = true;
+  renderRangeChips(); render();
 });
 $("#levelChips").addEventListener("click", e => {
   const c = e.target.closest(".chip[data-level]"); if (!c) return;

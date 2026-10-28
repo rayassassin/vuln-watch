@@ -280,6 +280,11 @@ def collect_files(src: Path) -> dict[str, bytes]:
         "data.json": data.read_bytes(),
         NOJEKYLL[0]: NOJEKYLL[1],
     }
+    # 首屏轻量包。老数据目录里可能没有，那就当它是可选件：前端拉不到
+    # 会自动退回直接取全量，发布不必因此失败。
+    lite = src / "data-lite.json"
+    if lite.exists():
+        files["data-lite.json"] = lite.read_bytes()
     return files
 
 
@@ -330,7 +335,7 @@ def remote_is_current(files: dict[str, bytes], repo: str, branch: str,
             diffs.append(f"{name} 缺失")
         elif rsha != lsha:
             diffs.append(f"{name} 已变")
-    return (not diffs), "、".join(diffs) if diffs else "三份文件均一致"
+    return (not diffs), "、".join(diffs) if diffs else f"{len(files)} 份文件均一致"
 
 
 def main() -> int:
