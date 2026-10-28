@@ -24,7 +24,7 @@ python collect.py --days 1 --no-commit
 python collect.py --via cli        # cli | webhook | both
 ```
 
-生产环境跑在云服务器，每天 18:00 由系统 cron 触发；本机只做开发与同步（见下面「部署到云服务器」）。
+生产环境跑在云服务器，每天 00:00 和 12:00 由系统 cron 触发；本机只做开发与同步（见下面「部署到云服务器」）。
 
 可选环境变量：
 
@@ -53,7 +53,7 @@ python collect.py --via cli        # cli | webhook | both
 ```
 🛡 漏洞情报全景 · 10月27日
 
-📅 统计区间　10-26 18:00 → 10-27 18:00
+📅 统计区间　10-27 12:00 → 10-28 12:00
 📊 采集 446 条 · 命中 25 条
 　　🔴 立即处置 9 ｜ 🟠 本周处置 10 ｜ 🟡 观察 6
 🔍 数据源　NVD · OSV · Packagist · KEV · EPSS
@@ -144,8 +144,11 @@ python3 scripts/deploy.py
 定时任务（服务器 crontab）：
 
 ```
-0 18 * * * /opt/vuln-watch/scripts/cron-run.sh
+0 0,12 * * * /opt/vuln-watch/scripts/cron-run.sh
 ```
+
+每天 00:00 与 12:00 各抓一次。两次窗口都取最近 24h，刻意留重叠，
+配合 `state.db` 的 `mark_seen` 水位去重：宁可多查一遍，不漏；已推过的 CVE 不会重复推。
 
 **为什么必须在服务器上跑**：自建应用配了可信 IP 白名单，本机出口 IP 调 `message/send`
 会被拒（`errcode 60020`）。服务器在名单内，本机不在。本机想直发只能走 `channel: cli`（wecom-cli）。

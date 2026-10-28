@@ -212,14 +212,14 @@
   .table-scroll { overflow-x: auto; }
   table.models { width: 100%; border-collapse: collapse; font-size: 13.5px; }
   table.models thead th {
-    text-align: left; padding: 12px 16px; font-size: 12px; font-weight: 600;
+    text-align: left; padding: 12px 12px; font-size: 12px; font-weight: 600;
     color: var(--text-3); border-bottom: 1px solid var(--line);
     white-space: nowrap; background: var(--panel-2);
   }
   table.models thead th.sortable { cursor: pointer; transition: color .14s; }
   table.models thead th.sortable:hover { color: var(--text); }
   table.models thead th.sorted { color: var(--brand); }
-  table.models tbody td { padding: 13px 16px; border-bottom: 1px solid var(--line); vertical-align: middle; }
+  table.models tbody td { padding: 13px 12px; border-bottom: 1px solid var(--line); vertical-align: middle; }
   table.models tbody tr:last-child td { border-bottom: 0; }
   table.models tbody tr:hover { background: #f8f8fc; }
 
@@ -232,9 +232,9 @@
   .lv-tag.P1 { background: var(--lv-p1-bg); color: var(--lv-p1-tx); }
   .lv-tag.P2 { background: var(--lv-p2-bg); color: var(--lv-p2-tx); }
 
-  .cve-id { font-family: var(--mono); font-weight: 600; color: var(--brand); }
+  .cve-id { font-family: var(--mono); font-weight: 600; color: var(--brand); white-space: nowrap; }
   .comp-name { color: var(--text); font-weight: 600; }
-  .model-title { color: var(--text-2); font-size: 13px; max-width: 340px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .model-title { color: var(--text-2); font-size: 13px; max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .cvss-num { font-family: var(--mono); font-weight: 600; }
   .tag {
     display: inline-flex; align-items: center; gap: 3px;
@@ -389,10 +389,10 @@
       <div class="spacer"></div>
 
       <select class="select" id="sortSelect" title="排序方式">
+        <option value="newest" selected>发布日期最新</option>
         <option value="level">按分级（P0→P2）</option>
         <option value="cvss-desc">CVSS 从高到低</option>
         <option value="epss-desc">EPSS 从高到低</option>
-        <option value="newest">发布时间最新</option>
         <option value="name">CVE A→Z</option>
       </select>
 
@@ -433,13 +433,13 @@
             <tr>
               <th>级别</th>
               <th>CVE</th>
+              <th class="sortable sorted" data-sort="newest">发布日期</th>
               <th>组件</th>
               <th class="hide-sm">描述</th>
               <th class="sortable" data-sort="cvss-desc">CVSS</th>
               <th class="sortable" data-sort="epss-desc">EPSS</th>
               <th class="hide-md">标签</th>
               <th class="hide-md">影响</th>
-              <th class="hide-xs">发布</th>
             </tr>
           </thead>
           <tbody id="tbody"></tbody>
@@ -477,7 +477,7 @@ const RANGES = [[7, "近 7 天"], [30, "近 30 天"], [90, "近 90 天"], [365, 
 const $ = (s) => document.querySelector(s);
 
 let DATA = { entries: [], daily: [], stats: {}, sources: [], degraded: [], range: {}, last_run: null };
-let state = { range: 365, level: "all", flags: new Set(), comps: new Set(), search: "", sort: "level", view: "table" };
+let state = { range: 365, level: "all", flags: new Set(), comps: new Set(), search: "", sort: "newest", view: "table" };
 
 function esc(s) {
   return (s || "").replace(/[&<>"']/g, c => ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;" }[c]));
@@ -550,7 +550,7 @@ function filtered() {
     if (s === "level") return (LEVEL_ORDER[a.level] ?? 9) - (LEVEL_ORDER[b.level] ?? 9) || (b.cvss || 0) - (a.cvss || 0);
     if (s === "cvss-desc") return (b.cvss || 0) - (a.cvss || 0);
     if (s === "epss-desc") return (b.epss || 0) - (a.epss || 0);
-    if (s === "newest") return (b.published || "").localeCompare(a.published || "");
+    if (s === "newest") return (b.published || "").localeCompare(a.published || "") || (b.cvss || 0) - (a.cvss || 0);
     if (s === "name") return (a.cve || "").localeCompare(b.cve || "");
     return 0;
   });
@@ -573,13 +573,13 @@ function renderTable(list) {
     <tr onclick="window.open('${esc(e.url)}','_blank')" style="cursor:pointer">
       <td><span class="lv-tag ${e.level}">${e.level}</span></td>
       <td class="cve-id">${esc(e.cve)}</td>
-      <td class="comp-name">${esc(e.component || "—")}</td>
+      <td style="color:var(--text-2);white-space:nowrap">${fmtDate(e.published)}</td>
+      <td class="comp-name" style="max-width:140px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(e.component || "")}">${esc(e.component || "—")}</td>
       <td class="model-title hide-sm" title="${esc(e.title || "")}">${esc((e.title || "").slice(0, 56))}</td>
       <td class="cvss-num">${cvssText(e)}</td>
       <td class="cvss-num">${e.epss > 0 ? (e.epss * 100).toFixed(0) + "%" : "—"}</td>
       <td class="hide-md">${flagTags(e)}</td>
-      <td class="hide-md" style="color:var(--text-2);max-width:240px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(e.impact || "")}">${esc((e.impact || "").slice(0, 36))}</td>
-      <td class="hide-xs" style="color:var(--text-3)">${fmtDate(e.published)}</td>
+      <td class="hide-md" style="color:var(--text-2);max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(e.impact || "")}">${esc((e.impact || "").slice(0, 36))}</td>
     </tr>`).join("");
 }
 
@@ -608,6 +608,14 @@ function renderCards(list) {
 
 const RENDER_LIMIT = 500;   // 一年数据有四千条，全量塞进 DOM 会卡；超出只渲染前 N 条
 
+function syncSortUI() {
+  document.querySelectorAll("table.models thead th.sortable").forEach(th => {
+    th.classList.toggle("sorted", th.dataset.sort === state.sort);
+  });
+  const sel = $("#sortSelect");
+  if (sel && sel.value !== state.sort) sel.value = state.sort;
+}
+
 function render() {
   const all = filtered();
   const list = all.slice(0, RENDER_LIMIT);
@@ -628,6 +636,7 @@ function render() {
   }
   renderStats(all);
   renderTrend();
+  syncSortUI();
 }
 
 function renderStats(list) {
@@ -769,6 +778,9 @@ $("#compChips").addEventListener("click", e => {
 });
 $("#search").addEventListener("input", e => { state.search = e.target.value.trim(); render(); });
 $("#sortSelect").addEventListener("change", e => { state.sort = e.target.value; render(); });
+document.querySelectorAll("table.models thead th.sortable").forEach(th => {
+  th.addEventListener("click", () => { state.sort = th.dataset.sort; render(); });
+});
 $("#viewSeg").addEventListener("click", e => {
   const b = e.target.closest("button[data-view]"); if (!b) return;
   state.view = b.dataset.view;

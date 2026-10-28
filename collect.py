@@ -832,7 +832,7 @@ def render_markdown(items: list[dict], stats: dict) -> str:
     p2 = [i for i in items if i["level"] == "P2"]
 
     lines = [
-        f"**🛡 漏洞情报全景 · {until.strftime('%m月%d日')}**",
+        f"**🛡 漏洞情报全景 · {until.strftime('%m月%d日 %H:%M')}**",
         "",
         f"📅 统计区间　{since.strftime('%m-%d %H:%M')} → {until.strftime('%m-%d %H:%M')}",
         f"📊 采集 **{scanned}** 条 · 命中 **{len(items)}** 条",
