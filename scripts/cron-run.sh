@@ -14,6 +14,19 @@ LOG="$LOGDIR/cron-$(date +%Y%m%d).log"
     "$BASE/run.sh" --days 1
     rc=$?
     echo "=== $(date '+%F %T') exit $rc ==="
+
+    # 采集成功后把看板推到 GitHub Pages。
+    # 这一步失败不能算日报失败：消息已经发出去了，页面晚一轮更新而已，
+    # 所以只记 warn 不改 rc，避免误触发「🔴 推送失败」告警。
+    if [ "$rc" -eq 0 ]; then
+        if [ -f "$BASE/.pages_token" ]; then
+            echo "=== $(date '+%F %T') publish pages ==="
+            cd "$BASE" && GH_PAGES_TOKEN="$(cat "$BASE/.pages_token")" \
+                python3 scripts/publish_pages.py || echo "[warn] Pages 发布失败，看板未更新（不影响日报）"
+        else
+            echo "[skip] 未配置 $BASE/.pages_token，跳过 Pages 发布"
+        fi
+    fi
 } >> "$LOG" 2>&1
 
 if [ "$rc" -ne 0 ]; then

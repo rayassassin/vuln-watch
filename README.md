@@ -208,6 +208,30 @@ cd web && python3 -m http.server 8080      # http://localhost:8080
 表格 / 卡片两种视图、**每页 50 条分页**（顶部有紧凑翻页，底部有完整页码）、
 命中趋势图（跨度超 70 天自动按月聚合）。
 
+### 发布到 GitHub Pages
+
+看板不在服务器上对外提供服务，而是推到一个纯静态仓库：
+
+**https://rayassassin.github.io/vuln-watch-pages/**
+
+```bash
+python3 scripts/publish_pages.py          # 手动发一次
+python3 scripts/publish_pages.py --dry-run # 只组装不推送
+```
+
+服务器上 cron 会在采集成功后自动发布（`cron-run.sh` 里调用）。需要一次性配 token：
+
+1. GitHub → Settings → Developer settings → Personal access tokens → **Fine-grained tokens**
+2. Repository access 只勾 `vuln-watch-pages`，权限只给 **Contents: Read and write**
+3. 服务器上落盘：`echo '<token>' > /opt/vuln-watch/.pages_token && chmod 600 /opt/vuln-watch/.pages_token`
+
+没有这个文件时，cron 只跳过发布并在日志写 `[skip]`，**不影响日报推送**。
+
+**为什么每次 force push 单个 commit**：data.json 有几 MB，一天两次正常提交，
+一年能把仓库历史撑到几个 GB。每次 orphan commit + `--force`，旧对象不进任何分支，
+GitHub 侧 GC 之后体积稳定在「一份快照」的量级。代价是没有历史版本可回溯，
+而这个页面本来也不需要——要历史去 state.db。
+
 ### 回填 vs 日常，两条通道各管一段
 
 | | `--since` / `--backfill N` | 日常运行 |
