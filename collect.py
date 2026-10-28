@@ -549,6 +549,14 @@ GH_ECO_MAP = {
 }
 
 
+def _next_link(link_header: str) -> str:
+    """从 Link 头里取 rel="next" 的地址。GitHub 的 advisories 端点只认游标，不认 page。"""
+    for part in (link_header or "").split(","):
+        if 'rel="next"' in part:
+            return part.split(";")[0].strip().strip("<>")
+    return ""
+
+
 def fetch_github_advisories(
     ecosystems: list[str], since: datetime, cfg: dict, max_pages: int = 3,
     watch_names: set[str] | None = None,
@@ -556,12 +564,14 @@ def fetch_github_advisories(
     """
     GitHub Advisory：匿名可调但限流 60 次/小时，配 GITHUB_TOKEN 提到 5000。
     published 参数要传日期区间 "A..B"，不是 ">=A"。
-    max_pages：日常增量 3 页（300 条）够用；回填要放大。
+
+    ⚠️ 这个端点的 page 参数是**失效的**：page=1 和 page=2 返回一模一样的数据。
+       实测 6 个生态 × 20 页 = 12000 条里只有 595 条是唯一的，其余全是重复。
+       必须跟着 Link: rel="next" 的游标翻页，这是唯一能拿全的手段。
 
     watch_names：资产清单里的包坐标。命中即代表"你真的在用受影响版本"，
     这条判断以前拿不到——因为没取包名，组件名全靠标题猜，Spring/Jackson
-    这类包的漏洞就被记成了"无组件"。advisory 自带的 vulnerabilities[].package
-    正好补上这个洞。
+    这类包的漏洞就被记成了"无组件"。
     """
     token = os.environ.get("GITHUB_TOKEN", "").strip()
     headers = {"Accept": "application/vnd.github+json"}
@@ -577,12 +587,15 @@ def fetch_github_advisories(
         gh_eco = GH_ECO_MAP.get(eco)
         if not gh_eco:
             continue
-        page = 1
-        while page <= max_pages:
+        url = cfg["feeds"]["github_advisories"]
+        params = {"ecosystem": gh_eco, "per_page": 100, "published": published}
+        fetched = 0
+        page = 0
+        while page < max_pages:
+            page += 1
             try:
-                resp = http_get(cfg["feeds"]["github_advisories"], params={
-                    "ecosystem": gh_eco, "per_page": 100, "page": page, "published": published,
-                }, headers=headers)
+                resp = (http_get(url, headers=headers) if page > 1
+                        else http_get(url, params=params, headers=headers))
                 batch = resp.json()
             except Exception as exc:  # noqa: BLE001
                 log(f"  ! GitHub Advisory 失败 {gh_eco} p{page}：{exc}")
@@ -604,10 +617,13 @@ def fetch_github_advisories(
                     "asset": pkg, "affected_range": rng,
                     "exact_match": bool(pkg) and pkg in watch,
                 })
-            if len(batch) < 100:
+            fetched += len(batch)
+            nxt = _next_link(resp.headers.get("link", ""))
+            if not nxt or len(batch) < 100:
                 break
-            page += 1
+            url = nxt
             time.sleep(1)
+        log(f"  {gh_eco}: {fetched} 条 / {page} 页")
         time.sleep(1)
 
     log(f"GitHub Advisory 拿到 {len(items)} 条")
