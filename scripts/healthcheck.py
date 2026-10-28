@@ -67,28 +67,50 @@ class Result:
         return "\n".join(out)
 
 
-def http_probe(url: str, timeout: int = 25, want_json: bool = False) -> tuple[bool, str]:
-    """直接 GET，返回 (是否 2xx, 描述)。刻意不走代理，免得本地代理掩盖真实可达性。"""
+def http_probe(url: str, timeout: int = 25, want_json: bool = False,
+               retries: int = 2) -> tuple[bool, str]:
+    """
+    直接 GET，返回 (是否 2xx, 描述)。刻意不走代理，免得本地代理掩盖真实可达性。
+    带重试：国内机房到 GitHub Pages 的 CDN 抖动很大，
+    实测同一个 URL 一次 30s 超时、下一次 17s 成功，不能一次定生死。
+    """
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-    req = urllib.request.Request(url, headers={"User-Agent": "vuln-watch-health"})
-    t0 = time.time()
-    try:
-        with opener.open(req, timeout=timeout) as resp:
-            raw = resp.read()
-            cost = time.time() - t0
-            note = f"HTTP {resp.status} · {len(raw):,} B · {cost:.2f}s"
-            if want_json:
-                try:
-                    data = json.loads(raw)
-                except Exception:  # noqa: BLE001
-                    return False, note + " · 内容不是合法 JSON"
-                n = len(data.get("entries") or [])
-                note += f" · {n:,} 条 · {data.get('generated_at', '?')}"
-            return 200 <= resp.status < 300, note
-    except urllib.error.HTTPError as exc:
-        return False, f"HTTP {exc.code}"
-    except Exception as exc:  # noqa: BLE001
-        return False, f"{type(exc).__name__}: {str(exc)[:70]}"
+    last = ""
+    for attempt in range(1, retries + 1):
+        req = urllib.request.Request(url, headers={"User-Agent": "vuln-watch-health"})
+        t0 = time.time()
+        try:
+            with opener.open(req, timeout=timeout) as resp:
+                raw = resp.read()
+                cost = time.time() - t0
+                note = f"HTTP {resp.status} · {len(raw):,} B · {cost:.2f}s"
+                if attempt > 1:
+                    note += f"（第 {attempt} 次成功）"
+                if want_json:
+                    try:
+                        data = json.loads(raw)
+                    except Exception:  # noqa: BLE001
+                        return False, note + " · 内容不是合法 JSON"
+                    n = len(data.get("entries") or [])
+                    note += f" · {n:,} 条 · {data.get('generated_at', '?')}"
+                return 200 <= resp.status < 300, note
+        except urllib.error.HTTPError as exc:
+            return False, f"HTTP {exc.code}"
+        except Exception as exc:  # noqa: BLE001
+            last = f"{type(exc).__name__}: {str(exc)[:70]}"
+        if attempt < retries:
+            time.sleep(3)
+    return False, last + f"（{retries} 次均失败）"
+
+
+_PROBE_CACHE: dict[str, tuple[bool, str]] = {}
+
+
+def cached_probe(url: str, timeout: int = 60) -> tuple[bool, str]:
+    """同一个 URL 只探一次：首页与「日报主入口」往往是同一个地址，不必打两遍。"""
+    if url not in _PROBE_CACHE:
+        _PROBE_CACHE[url] = http_probe(url, timeout=timeout)
+    return _PROBE_CACHE[url]
 
 
 def size_probe(url: str, timeout: int = 30, retries: int = 3) -> tuple[bool, int, str]:
@@ -270,11 +292,20 @@ def main() -> int:
             drift.append(name)
 
     # ---- 5. 公网可达性（Pages 那条是备案前唯一的对外入口）----
-    # data.json 不下载全文，只比远端字节数（从国内拉 4 MB 要一两分钟，会把自检拖成超时）
+    # 这一节只做「抽样」。文件对不对已经由上面的 blob sha 判定（走 api.github.com，可靠），
+    # 而 CDN 可达性在国内机房抖动极大：同一个 URL 一次 30s 超时、下一次 17s 成功。
+    # 所以这里的失败只在「内容也对不上」时才定性为 fail，否则只提示，
+    # 避免链路抖动把自检变成天天报错的噪音。
     owner, name = args.repo.split("/")
     site = f"https://{owner}.github.io/{name}/"
-    ok, note = http_probe(site, timeout=30)
-    res.add("GitHub Pages 首页", "ok" if ok else "fail", f"{site} · {note}")
+    ok, note = cached_probe(site)
+    if ok:
+        res.add("GitHub Pages 首页", "ok", f"{site} · {note}")
+    elif drift:
+        res.add("GitHub Pages 首页", "fail", f"{site} · {note}")
+    else:
+        res.add("GitHub Pages 首页", "warn",
+                f"{site} · {note}（文件已由 blob sha 验证，可能只是链路抖动，建议浏览器复核）")
 
     ok, total, note = size_probe(site + "data.json")
     if ok and total == len(raw):
@@ -298,7 +329,7 @@ def main() -> int:
             if not url:
                 res.add(label, "skip", "未配置")
                 continue
-            ok, note = http_probe(url, timeout=30)
+            ok, note = cached_probe(url)   # 与站点同址时自动复用上面的结果，不重复打
             res.add(label, "ok" if ok else "warn", f"{url} · {note}")
 
     # ---- 输出 ----
@@ -316,7 +347,11 @@ def main() -> int:
                 print("   远端快照不是最新 → cd 到项目根目录跑：")
                 print("   GH_PAGES_TOKEN=$(cat .pages_token) python3 scripts/publish_pages.py")
         else:
-            print("✅ 两条链路都在正常服务，数据一致")
+            warns = [r["name"] for r in res.rows if r["status"] == "warn"]
+            if warns:
+                print(f"✅ 数据一致、链路在位；{len(warns)} 项提示（多为公网链路抖动）：{', '.join(warns)}")
+            else:
+                print("✅ 两条链路都在正常服务，数据一致")
 
     return 0 if not res.failed else 1
 
