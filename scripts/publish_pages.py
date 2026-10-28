@@ -398,11 +398,14 @@ def main() -> int:
                 raise SystemExit("token 无效或已过期，检查 .pages_token")
             raise
 
-        # 大文件先传，失败就早点失败，省得后面白建 tree
+        # 遍历 collect_files 实际返回的文件集合，别再手写文件名：
+        # 以前这里写死成三个，后来加的 data-lite.json 就静默没进 tree，
+        # 前端 404 退回全量，等于白做。
+        # 按字节数从大到小传：大文件先传，失败就早点失败，省得后面白建 tree。
         entries = []
-        for name in ("index.html", "data.json", NOJEKYLL[0]):
+        for name in sorted(files, key=lambda n: len(files[n]), reverse=True):
             sha = make_blob(args.repo, files[name], token)
-            print(f"   blob {name:<12} {len(files[name]):>9,} B  → {sha[:10]}")
+            print(f"   blob {name:<16} {len(files[name]):>9,} B  → {sha[:10]}")
             entries.append({"path": name, "mode": "100644",
                             "type": "blob", "sha": sha})
 
