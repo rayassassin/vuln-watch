@@ -26,6 +26,9 @@ deploy.env
 web/data.json
 web/data-lite.json
 
+# NVD 年度全量 feed 缓存：单份 40 MB，只为回填 CPE 用一次，不入库
+.feed-cache/
+
 # Pages 发布指纹：记录上一次发布的内容，内容没变就不重复推
 .pages_state
 

@@ -247,6 +247,23 @@ cd web && python3 -m http.server 8080      # http://localhost:8080
 表格 / 卡片两种视图、**每页 20 条分页**（顶部有紧凑翻页，底部有完整页码）、
 命中趋势图（跨度超 70 天自动按月聚合）。
 
+#### 组件(Product) 与 厂商(Vendor) 不是一回事
+
+看板里这两列是分开的，口径对齐 NVD 页面上的 Affected Products：
+
+| 列 | 含义 | 例 | 数据来源 |
+|---|---|---|---|
+| **组件** | 具体产品 Product | Essbase / WebLogic Server / Pillow | CPE 第 5 段，其次是 OSV 包名、KEV 产品名 |
+| **厂商** | 厂商 Vendor | Oracle / Apache / Python | CPE 第 4 段，其次是 KEV 厂商名 |
+
+早期版本只有一列"组件"，装的是厂商名——筛出来全是 Oracle、Apache 这种粒度，
+对不上自有资产。现在组件列只放 Product，厂商单独一列（窄屏隐藏，鼠标悬浮可看）。
+
+NVD 有一批条目发布时还没分析完（`configurations` 为空，占库里约 3 成），
+拿不到 CPE：这类会退到 OSV 包名 / KEV 产品名 / 标题推断，实在认不出来就留空——
+**宁可空着，也不拿厂商名当组件糊弄**。历史数据用 `scripts/backfill_vendor_product.py`
+一次性纠正过（拉 NVD 年度全量 feed 建 CPE 映射，几秒完成，比逐条查 API 快几个数量级）。
+
 #### 两段式加载：为什么有两个 data 文件
 
 `collect.py` 每轮写两份：`data.json`（全量，约 4 MB）和 `data-lite.json`
@@ -285,6 +302,16 @@ cd web && python3 -m http.server 8080      # http://localhost:8080
 python3 scripts/healthcheck.py          # 确认两条链路都在跑、数据是同一份
 python3 scripts/healthcheck.py --json   # 机器可读，可直接接监控
 ```
+
+历史条目的厂商/组件纠正（**只需跑一次**，幂等，重复执行不产生副作用）：
+
+```bash
+python3 scripts/backfill_vendor_product.py --years 2026       # 拉 NVD feed 建映射并应用
+python3 scripts/backfill_vendor_product.py --map cpe_map.json # 复用映射，不下 42 MB
+```
+
+口径变了才需要再跑（比如以后换了 CPE 的挑选规则）。日常采集的新条目由
+`collect.py` 直接带上正确的 vendor / product，不用回填。
 
 自检不下载 4 MB：GitHub Contents API 会返回每个文件的 **git blob sha1**，
 本地用同一口径算一遍（`sha1("blob <len>\0" + content)`），相等即同一份内容。

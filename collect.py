@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sqlite3
 import sys
 import time
@@ -161,6 +162,83 @@ def fetch_epss(cve_ids: list[str], cfg: dict) -> dict[str, float]:
     return out
 
 
+def _cpe_vendor_product(criteria: str) -> tuple[str, str]:
+    """
+    CPE 2.3 串 → (vendor, product)。
+
+    NVD 的 configurations 里给的是 CPE 匹配串，形如
+      cpe:2.3:a:microsoft:windows_10_1607:-:*:*:*:*:*:*:*
+        ↑   ↑ ↑    ↑        ↑
+      前缀 版本 类型 vendor  product
+    厂商和产品是第 4、5 段。取不到就返回空串，不硬猜。
+    """
+    if not criteria or not criteria.startswith("cpe:"):
+        return "", ""
+    parts = criteria.split(":")
+    if len(parts) < 6:
+        return "", ""
+    part, vendor, product = parts[2], parts[3], parts[4]
+    # 类型只认应用(a)/操作系统(o)/硬件(h)，NVD 偶尔塞 n/a 占位
+    if part not in ("a", "o", "h"):
+        return "", ""
+    for bad in ("n/a", "*", "-", ""):
+        if vendor.lower() == bad or product.lower() == bad:
+            return "", ""
+    return vendor, product
+
+
+def _nvd_affected(cve_obj: dict) -> tuple[str, str, list[str]]:
+    """
+    从 NVD 条目的 configurations 里取「受影响产品」。
+
+    返回 (vendor, product, products)。挑选顺序：
+      1. 先取应用层(a)的 CPE —— 漏洞本体通常在应用上
+      2. 没有应用层再退到操作系统(o)、硬件(h)
+      3. 同一层里取第一个有效的，其余产品名收进 products 备查
+    这么挑是因为 Oracle 这类 CPE 清单能塞上百条，随便取第一个会拿到
+    完全不相干的中间件；按类型分层再取，命中率明显更稳。
+    """
+    found: list[tuple[int, int, str, str]] = []   # (类型优先级, 是否受影响本体, vendor, product)
+    products: list[str] = []
+    for cfg in cve_obj.get("configurations", []) or []:
+        for node in cfg.get("nodes", []) or []:
+            for m in node.get("cpeMatch", []) or []:
+                part = (m.get("criteria", "") or "").split(":")[2:3]
+                v, p = _cpe_vendor_product(m.get("criteria", ""))
+                if not p:
+                    continue
+                if p not in products:
+                    products.append(p)
+                # vulnerable=False 表示只是运行环境、不是受影响本体，主选时靠后
+                prio = {"a": 0, "o": 1, "h": 2}.get(part[0] if part else "", 3)
+                found.append((prio, 0 if m.get("vulnerable") is not False else 1, v, p))
+
+    if not found:
+        return "", "", []
+    found.sort(key=lambda t: (t[0], t[1]))
+    vendor, product = found[0][2], found[0][3]
+    # 同一产品名常常挂在多个厂商条目下，厂商取最靠前的那个非空值
+    if not vendor:
+        vendor = next((f[2] for f in found if f[2]), "")
+    return vendor, product, products
+
+
+def _pretty_name(raw: str) -> str:
+    """
+    把 CPE 里的产品名变成人能读的样子。
+    windows_10_1607 → Windows 10 1607；已知组件走别名表，避免大小写怪胎。
+    """
+    if not raw:
+        return ""
+    key = raw.lower().replace("_", " ").strip()
+    key = re.sub(r"\s+", " ", key)
+    if key in COMPONENT_ALIAS:
+        return COMPONENT_ALIAS[key]
+    if raw.lower() in COMPONENT_ALIAS:
+        return COMPONENT_ALIAS[raw.lower()]
+    return " ".join(w if (w.isupper() or w.isdigit()) else w.capitalize() for w in key.split())
+
+
 def _parse_nvd_raw(raw: list[dict], src_label: str) -> list[dict]:
     """把 NVD 原始批次解析成统一条目。CNA 与关键词两条通道共用这一份解析。"""
     items: list[dict] = []
@@ -185,12 +263,18 @@ def _parse_nvd_raw(raw: list[dict], src_label: str) -> list[dict]:
                 if score > 0:
                     break
 
+        # 受影响产品：NVD 页面上「Affected Products」那一栏的数据源就是 configurations。
+        # 之前只按 CNA / 标题猜，结果 Oracle、Apache 这类厂商名被当成组件显示，
+        # 粒度粗到没法对应自有资产。现在直接从 CPE 里取真正的 product。
+        vendor, product, products = _nvd_affected(cve)
+
         items.append({
             "id": cve_id, "cve": cve_id, "title": desc[:180],
             "cvss": score, "cvss_vector": vector, "cvss_exact": True,
             "source": src_label,
             "url": f"https://nvd.nist.gov/vuln/detail/{cve_id}",
             "published": cve.get("published", "")[:10],
+            "vendor": vendor, "product": product, "products": products,
             # CISA 官方处置动作，比我们瞎猜的修复建议权威
             "cisa_action": cve.get("cisaRequiredAction", "") or "",
             "cisa_due": cve.get("cisaActionDue", "") or "",
@@ -734,6 +818,13 @@ def normalize_and_score(
             for f in ("cvss_vector", "affected_range", "cisa_action", "cisa_due"):
                 if it.get(f) and not cur.get(f):
                     cur[f] = it[f]
+            # 厂商/产品以 NVD 的 CPE 为准，后来的源不覆盖先到的
+            for f in ("vendor", "product"):
+                if it.get(f) and not cur.get(f):
+                    cur[f] = it[f]
+            for p in it.get("products") or []:
+                if p not in cur.setdefault("products", []):
+                    cur["products"].append(p)
             continue
         merged[key] = {
             "key": key, "cve": it.get("cve", ""), "title": it.get("title", ""),
@@ -743,6 +834,8 @@ def normalize_and_score(
             "assets": [it["asset"]] if it.get("asset") else [],
             "asset_version": it.get("asset_version", ""),
             "affected_range": it.get("affected_range", ""),
+            "vendor": it.get("vendor", ""), "product": it.get("product", ""),
+            "products": list(it.get("products") or []),
             "cvss_vector": it.get("cvss_vector", ""),
             "cisa_action": it.get("cisa_action", ""),
             "cisa_due": it.get("cisa_due", ""),
@@ -845,6 +938,27 @@ COMPONENT_ALIAS = {
     "requests": "Requests", "urllib3": "urllib3", "cryptography": "cryptography",
     "psycopg2": "psycopg2", "sqlalchemy": "SQLAlchemy",
     "postgresql": "PostgreSQL", "psycopg": "psycopg",
+    # CPE 的 product 是小写下划线，机械首字母大写会产出 Vm Virtualbox、
+    # Siebel Crm 这种怪胎。下面这批是常见产品的正确写法，人工指定。
+    "vm virtualbox": "VirtualBox", "virtualbox": "VirtualBox",
+    "siebel crm": "Siebel CRM", "peoplesoft enterprise peopletools": "PeopleSoft PeopleTools",
+    "e-business suite": "Oracle E-Business Suite", "http server": "Apache HTTP Server",
+    "weblogic server": "Oracle WebLogic Server", "mysql server": "MySQL Server",
+    "vmware vcenter server": "VMware vCenter", "spring framework": "Spring Framework",
+    # 下面这批是"机械首字母大写会毁掉"的名字：大小写本身有含义的包名与品牌
+    "php": "PHP", "vm2": "vm2", "filelock": "filelock", "nltk": "nltk",
+    "praisonai": "PraisonAI", "openclaw": "OpenClaw", "open webui": "Open WebUI",
+    "avideo": "AVideo", "nodejs": "Node.js", "node.js": "Node.js",
+    # 缩写与多词品牌：机械首字母大写会把 SE 写成 Se、WebUI 写成 Webui
+    "java se": "Java SE", "java ee": "Java EE", "openwebui": "Open WebUI",
+    # 带连字符的词用 capitalize 只能大写首字母，Oracle 这两个产品名得整段指定
+    "e-business suite": "Oracle E-Business Suite",
+    "oracle e-business suite": "Oracle E-Business Suite",
+    "weblogic server": "Oracle WebLogic Server",
+    "oracle weblogic server": "Oracle WebLogic Server",
+    "linuxfoundation": "Linux Foundation", "powerdns": "PowerDNS",
+    "mysql server": "MySQL Server", "sql server": "SQL Server",
+    "spring boot": "Spring Boot", "github": "GitHub",
 }
 SEP = "━" * 14
 
@@ -872,17 +986,8 @@ TITLE_HINTS = [
     ("sqlite", "SQLite"), ("php", "PHP"),
 ]
 
-# CNA 归属映射：NVD 条目没有资产坐标也没有明显标题特征时的兜底
-CNA_VENDOR = {
-    "security@apache.org": "Apache",
-    "security@php.net": "PHP",
-    "secalert_us@oracle.com": "Oracle",
-    "cna@python.org": "Python",
-    "f5sirt@f5.com": "F5 / NGINX",   # nginx 的 CVE 大多由 F5 作为 CNA 分配
-    "cna@postgresql.org": "PostgreSQL",
-}
-
-# 关键词通道的归属兜底：标题里没写产品名时，至少知道是哪个关键词捞来的
+# 关键词通道的组件兜底：NVD 没给 CPE、标题里也没写清产品时，
+# 至少还能说清是"用哪个关键词捞来的"，这本来就是产品名（不是厂商名）
 KW_VENDOR = {
     "nginx": "Nginx", "postgresql": "PostgreSQL", "postgres": "PostgreSQL",
     "python": "Python", "vue": "Vue.js", "tomcat": "Apache Tomcat",
@@ -896,34 +1001,70 @@ KW_VENDOR = {
 LEVEL_RANK = {"P0": 0, "P1": 1, "P2": 2}
 
 
+def _asset_short(asset: str) -> str:
+    """OSV/GitHub 的资产坐标形如 PyPI/django、npm:lodash，取最后一段就是产品名。"""
+    a = asset or ""
+    for sep in (":", "/"):
+        if sep in a:
+            a = a.split(sep)[-1]
+    return a.strip()
+
+
 def _component_name(v: dict) -> str:
-    """给出条目的组件可读名，取不到就返回空串，不硬凑。"""
+    """
+    条目的**组件名**，即 NVD 页面「Affected Products」里的 Product。
+
+    厂商(Vendor)与产品(Product)是两回事：Oracle 是厂商，WebLogic Server 才是产品。
+    把厂商当组件显示，筛选出来的粒度根本对不上自有资产，所以这里只认产品。
+    取不到就返回空串，宁可空着也不拿厂商名糊弄。
+    """
+    # 1. NVD 的 CPE 最权威，直接就是 Affected Products 那一栏的数据
+    prod = v.get("product") or ""
+    if prod:
+        return _pretty_name(prod)
+    # 2. OSV / GitHub 的资产坐标，包名本身就是产品
     for asset in v.get("assets", []):
-        short = asset.split(":")[-1] if ":" in asset else asset
-        if short in COMPONENT_ALIAS:
-            return COMPONENT_ALIAS[short]
+        short = _asset_short(asset)
+        if not short:
+            continue
+        if short.lower() in COMPONENT_ALIAS:
+            return COMPONENT_ALIAS[short.lower()]
         if asset in COMPONENT_ALIAS:
             return COMPONENT_ALIAS[asset]
+        # GitHub advisory 的资产常带组织前缀，code.gitea.io/gitea → gitea
+        if "/" in short:
+            short = short.rsplit("/", 1)[-1]
         return short
-    # 没有资产坐标时，从标题里认
+    # 3. KEV 里 CISA 自己维护的官方产品名
+    if v.get("kev_product"):
+        return str(v["kev_product"]).strip()
+    # 4. 从标题里认产品
     title = (v.get("title") or "").lower()
     for key, name in TITLE_HINTS:
         if key in title:
             return name
-    # 再退一层：KEV 里有官方厂商/产品名，比标题猜得准
-    if v.get("kev_vendor"):
-        prod = v.get("kev_product") or ""
-        return f"{v['kev_vendor']} {prod}".strip()
-    # 最后退到 CNA 归属：至少让人知道这是 Apache 还是 Oracle 的洞
+    # 5. 关键词通道：捞的时候用的就是产品关键词，比厂商名准
     for src in v.get("sources", []):
-        if src.startswith("NVD/CNA:"):
-            vendor = CNA_VENDOR.get(src.split("NVD/CNA:", 1)[1], "")
-            if vendor:
-                return vendor
         if src.startswith("NVD/KW:"):
-            vendor = KW_VENDOR.get(src.split("NVD/KW:", 1)[1].lower(), "")
-            if vendor:
-                return vendor
+            name = KW_VENDOR.get(src.split("NVD/KW:", 1)[1].lower(), "")
+            if name:
+                return name
+    return ""
+
+
+def _vendor_name(v: dict) -> str:
+    """
+    条目的**厂商名**，即 CPE 里的 Vendor，例如 oracle、apache、microsoft。
+
+    只有真正拿到厂商证据才返回，不用产品名反推，也不拿 CNA 邮箱顶替——
+    CNA 归属只能说明"谁发的这个号"，不等于"谁的产品出了问题"。
+    """
+    ven = v.get("vendor") or ""
+    if ven:
+        return _pretty_name(ven)
+    if v.get("kev_vendor"):
+        return str(v["kev_vendor"]).strip()
+    # 资产坐标的生态前缀（PyPI/npm/maven）不是厂商，这里宁可留空
     return ""
 
 
@@ -949,9 +1090,11 @@ def _render_item(idx: int, v: dict, full: bool = True) -> list[str]:
     """
     cve = v["cve"] or v["key"]
     comp = _component_name(v)
+    ven = _vendor_name(v)
     head = f"**{idx}. {cve}**"
     if comp:
-        head += f" · {comp}"
+        # 只写产品名会让人分不清是谁家的，厂商放括号里做注脚
+        head += f" · {comp}（{ven}）" if ven and ven.lower() != comp.lower() else f" · {comp}"
 
     # 第二行：分数 + 关键标签
     cvss_str = f"CVSS {v['cvss']:.1f}" if v.get("cvss_exact") else f"CVSS≈{v['cvss']:.1f}"
@@ -1175,6 +1318,7 @@ def _web_entry(v: dict) -> dict:
         "attack_cond": (v.get("attack_cond") or "")[:120],
         "affected_range": (v.get("affected_range") or "")[:120],
         "component": _component_name(v),
+        "vendor": _vendor_name(v),
         "title": (v.get("title") or "")[:150],
         "url": v.get("url", ""),
         "sources": v.get("sources", []),
