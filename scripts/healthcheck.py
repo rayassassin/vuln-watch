@@ -91,6 +91,32 @@ def http_probe(url: str, timeout: int = 25, want_json: bool = False) -> tuple[bo
         return False, f"{type(exc).__name__}: {str(exc)[:70]}"
 
 
+def size_probe(url: str, timeout: int = 30) -> tuple[bool, int, str]:
+    """
+    只取前 2 KB，用 Content-Range / Content-Length 读出远端文件总大小。
+
+    为什么要这么绕：从国内拉 GitHub Pages 的 4 MB data.json 要 60～100 秒，
+    上一次自检就是卡在这里超时而报“错”。而“页面能不能打开”和“文件多大”
+    都不需要真把 4 MB 拉下来——字节数跟本地一致，加上 blob sha 比对，
+    已经足以证明远端就是那一份。
+    """
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    headers = {"User-Agent": "vuln-watch-health", "Range": "bytes=0-2047"}
+    try:
+        with opener.open(urllib.request.Request(url, headers=headers), timeout=timeout) as resp:
+            resp.read()
+            status = resp.status
+            crange = resp.headers.get("Content-Range") or ""
+            clen = resp.headers.get("Content-Length") or ""
+            total = crange.rsplit("/", 1)[-1] if "/" in crange else clen
+            total = int(total) if total.isdigit() else 0
+            return 200 <= status < 300, total, f"HTTP {status} · 远端 {total:,} B"
+    except urllib.error.HTTPError as exc:
+        return False, 0, f"HTTP {exc.code}"
+    except Exception as exc:  # noqa: BLE001
+        return False, 0, f"{type(exc).__name__}: {str(exc)[:60]}"
+
+
 def docker_health(container: str) -> tuple[str, str]:
     if not any(Path(p).exists() for p in ("/usr/bin/docker", "/usr/local/bin/docker")):
         return "skip", "本机没有 docker"
@@ -233,13 +259,19 @@ def main() -> int:
             drift.append(name)
 
     # ---- 5. 公网可达性（Pages 那条是备案前唯一的对外入口）----
+    # data.json 不下载全文，只比远端字节数（从国内拉 4 MB 要一两分钟，会把自检拖成超时）
     owner, name = args.repo.split("/")
     site = f"https://{owner}.github.io/{name}/"
     ok, note = http_probe(site, timeout=30)
     res.add("GitHub Pages 首页", "ok" if ok else "fail", f"{site} · {note}")
 
-    ok, note = http_probe(site + "data.json", timeout=60, want_json=True)
-    res.add("GitHub Pages 数据", "ok" if ok else "fail", note)
+    ok, total, note = size_probe(site + "data.json")
+    if ok and total == len(raw):
+        res.add("GitHub Pages 数据", "ok", f"{note}（与本地一致）")
+    elif ok and total:
+        res.add("GitHub Pages 数据", "fail", f"{note}（本地 {len(raw):,} B，远端是旧版）")
+    else:
+        res.add("GitHub Pages 数据", "fail", note)
 
     # ---- 6. 日报里给的地址是否能打开 ----
     cfg_file = ROOT / "vuln-watch.yaml"

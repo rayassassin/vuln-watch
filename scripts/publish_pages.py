@@ -366,9 +366,9 @@ def main() -> int:
         same, why = remote_is_current(files, args.repo, args.branch, token)
         if same:
             print(f"远端已是最新（{why}），跳过发布（--force 可强制重发）")
-            if args.wait > 0 or args.ensure_pages:
-                if args.ensure_pages:
-                    print(f"   pages → {ensure_pages(args.repo, args.branch, token)}")
+            # 跳过发布也要确认 Pages 还开着：它被关掉时页面同样是打不开的
+            if args.ensure_pages:
+                print(f"   pages → {ensure_pages(args.repo, args.branch, token)}")
             return 0
         print(f"远端需要更新：{why}")
 
