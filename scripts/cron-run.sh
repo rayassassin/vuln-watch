@@ -1,9 +1,16 @@
 #!/bin/sh
-# 供服务器 cron 调用。与 run.sh 的区别：负责日志落盘 + 失败告警。
+# 供服务器 cron 调用。与 run.sh 的区别：负责日志落盘 + 双链路维护 + 失败告警。
 # 告警走同一应用通道（尽力而为）；通道本身挂掉时至少留日志。
 #
 # 安装目录、token 位置都从环境变量取，默认值只是本项目的中性约定，
 # 换台机器部署只要设 VW_BASE 即可，不必改脚本。
+#
+# 看板是「双活」的，同一份 web/ 数据同时供给两条独立链路：
+#   ① GitHub Pages —— 发布到本仓库 gh-pages 分支（Git Data API），全球可达，
+#      不依赖这台服务器，是域名备案完成之前的对外正式入口。
+#   ② 自有服务器   —— nginx 容器只读挂载 web/ 目录，采集写完即刻生效。
+# 两条都跑，一条挂了另一条还能看；挂了哪条会单独提示，不会互相掩盖。
+# 想让某条彻底停掉：VW_PUBLISH_PAGES=0（停 Pages）或 VW_CHECK_WEB=0（停容器检查）。
 set -u
 
 BASE=${VW_BASE:-/opt/vuln-watch}
@@ -12,8 +19,13 @@ LOGDIR="$BASE/logs"
 mkdir -p "$LOGDIR"
 LOG="$LOGDIR/cron-$(date +%Y%m%d).log"
 TOKEN_FILE=${VW_PAGES_TOKEN_FILE:-$BASE/.pages_token}
-WEB_STATE=ok        # ok / fail / skip，看板容器可用性，用于决定要不要发提示
 WEB_CONTAINER=${VW_WEB_CONTAINER:-vuln-watch-web}
+PUBLISH_PAGES=${VW_PUBLISH_PAGES:-1}     # 默认发布，双活；设 0 才停
+CHECK_WEB=${VW_CHECK_WEB:-1}             # 默认检查容器
+PAGES_WAIT=${VW_PAGES_WAIT:-90}          # 等 Pages 构建的秒数，0 = 不等
+
+WEB_STATE=ok      # ok / fail / skip —— 自有服务器容器
+PAGES_STATE=ok    # ok / fail / skip —— GitHub Pages
 
 {
     echo "=== $(date '+%F %T') start ==="
@@ -22,62 +34,117 @@ WEB_CONTAINER=${VW_WEB_CONTAINER:-vuln-watch-web}
     rc=$?
     echo "=== $(date '+%F %T') exit $rc ==="
 
-    # 看板现在由 nginx 容器直接挂载采集输出目录对外服务：
-    # collect.py 写完 data.json 的那一刻，访客就已经能拿到新数据，
-    # 中间没有任何发布步骤，也就不存在「发布失败」这回事。
-    # 这里只做一件事：确认容器还活着。容器挂了页面就是白屏，必须吭声。
     if [ "$rc" -eq 0 ]; then
-        if command -v docker >/dev/null 2>&1; then
-            st=$(docker inspect -f '{{.State.Health.Status}}' "$WEB_CONTAINER" 2>/dev/null || echo missing)
-            echo "=== $(date '+%F %T') dashboard container: $st ==="
-            [ "$st" = "healthy" ] || WEB_STATE=fail
+        # ---- 链路 ②：自有服务器容器 ----
+        # collect.py 写完 data.json 的那一刻，挂载目录的访客就已经拿到新数据，
+        # 中间没有发布步骤，所以这里只需要确认容器还活着。容器挂了页面就是白屏。
+        if [ "$CHECK_WEB" = "1" ]; then
+            if command -v docker >/dev/null 2>&1; then
+                st=$(docker inspect -f '{{.State.Health.Status}}' "$WEB_CONTAINER" 2>/dev/null || echo missing)
+                echo "=== $(date '+%F %T') web container: $st ==="
+                if [ "$st" != "healthy" ]; then
+                    WEB_STATE=fail
+                    # 容器挂了就地拉一次，多数情况（Docker 重启、OOM）能自己起来。
+                    # 拉不起来才是真故障，由下面的告警负责喊人。
+                    echo "--- 尝试自动恢复 ---"
+                    ( cd "$BASE/deploy" && docker compose up -d 2>&1 | tail -5 ) || true
+                    sleep 3
+                    st2=$(docker inspect -f '{{.State.Health.Status}}' "$WEB_CONTAINER" 2>/dev/null || echo missing)
+                    echo "--- 恢复后状态：$st2 ---"
+                    [ "$st2" = "healthy" ] && WEB_STATE=ok
+                fi
+            else
+                echo "[warn] 未找到 docker，跳过自有服务器容器检查"
+                WEB_STATE=skip
+            fi
         else
-            echo "[warn] 未找到 docker，跳过看板可用性检查"
+            echo "[skip] VW_CHECK_WEB=0，跳过容器检查"
             WEB_STATE=skip
         fi
 
-        # 可选：仍想往 GitHub Pages 同步一份当异地备份，设 VW_PUBLISH_PAGES=1。
-        # 默认关闭：页面已经在本机对外服务，再发一份纯属浪费两次请求。
-        if [ "${VW_PUBLISH_PAGES:-0}" = "1" ] && [ -f "$TOKEN_FILE" ]; then
-            echo "=== $(date '+%F %T') publish pages (backup) ==="
-            cd "$BASE" && GH_PAGES_TOKEN="$(cat "$TOKEN_FILE")" \
-                python3 scripts/publish_pages.py || echo "[warn] 备份发布失败（不影响主站）"
+        # ---- 链路 ①：GitHub Pages ----
+        # 备案完成之前这条是唯一公网可达的入口，必须每轮跟着更新。
+        if [ "$PUBLISH_PAGES" = "1" ]; then
+            if [ -f "$TOKEN_FILE" ]; then
+                echo "=== $(date '+%F %T') publish pages ==="
+                cd "$BASE" && GH_PAGES_TOKEN="$(cat "$TOKEN_FILE")" \
+                    python3 scripts/publish_pages.py --ensure-pages --wait "$PAGES_WAIT"
+                prc=$?
+                echo "=== $(date '+%F %T') publish exit $prc ==="
+                [ "$prc" -eq 0 ] || PAGES_STATE=fail
+            else
+                echo "[warn] 未配置 $TOKEN_FILE，本轮跳过 Pages 发布"
+                PAGES_STATE=skip
+            fi
+        else
+            echo "[skip] VW_PUBLISH_PAGES=0，跳过 Pages 发布"
+            PAGES_STATE=skip
         fi
     fi
 } >> "$LOG" 2>&1
 
-# 看板打不开要说一声，别让人以为页面还在。
-# 一天只提醒一次（marker），修好之后第一次检查通过就清掉，不会变成刷屏。
+# 两条链路有任何一条不正常就说一声，别让人以为页面还在。
+# 一天只提醒一次（marker），全部恢复后清掉，不会变成刷屏。
 ALERT_MARK="$LOGDIR/.web_alert"
-if [ "$WEB_STATE" = "ok" ]; then
+if [ "$WEB_STATE" = "ok" ] && [ "$PAGES_STATE" = "ok" ]; then
     rm -f "$ALERT_MARK"
-elif [ "$rc" -eq 0 ] && [ ! -f "$ALERT_MARK" ]; then
-    python3 - "$WEB_STATE" "$LOG" "$WEB_CONTAINER" >> "$LOG" 2>&1 <<'PY'
+elif [ "$rc" -eq 0 ] && [ ! -f "$ALERT_MARK" ] && { [ "$WEB_STATE" != "ok" ] || [ "$PAGES_STATE" != "ok" ]; }; then
+    python3 - "$WEB_STATE" "$PAGES_STATE" "$LOG" "$WEB_CONTAINER" "$TOKEN_FILE" >> "$LOG" 2>&1 <<'PY'
 import os, sys
 base = os.environ.get("VW_BASE") or "/opt/vuln-watch"
 sys.path.insert(0, base)
 import yaml, collect
 
-state, logfile, container = sys.argv[1], sys.argv[2], sys.argv[3]
+web_state, pages_state, logfile, container, token_file = sys.argv[1:6]
 cfg = yaml.safe_load(open(os.path.join(base, "vuln-watch.yaml"), encoding="utf-8"))
+web = cfg.get("web") or {}
+main_url = (web.get("public_url") or "").strip()
+backup_url = (web.get("backup_url") or "").strip()
 
-if state == "skip":
-    why = "服务器上找不到 docker 命令，无法检查看板容器状态。"
-else:
-    tail = ""
-    try:
-        lines = [l.rstrip() for l in open(logfile, encoding="utf-8", errors="ignore").read().splitlines() if l.strip()]
-        tail = "\n".join(lines[-5:])
-    except OSError:
-        pass
-    why = (f"容器 {container} 状态不是 healthy（可能已退出或反代上游挂了）。\n\n"
-           "排查与恢复：\n"
-           f"  docker ps -a | grep {container}\n"
-           f"  docker logs {container} --tail 50\n"
-           f"  cd {base}/deploy && docker compose up -d\n\n"
-           f"日志尾部：\n{tail[:600]}")
+# 哪条挂了、哪条还活着，说清楚，别只说「看板异常」
+lines = []
+if web_state == "fail":
+    lines.append("· 自有服务器容器不健康（页面可能打不开）")
+elif web_state == "skip":
+    lines.append("· 自有服务器容器未检查（服务器上没有 docker）")
 
-msg = f"**🟡 看板容器异常**\n\n日报推送正常，但全景看板可能已经打不开了。\n\n{why}"
+if pages_state == "fail":
+    lines.append("· GitHub Pages 发布或构建失败（线上还是上一版）")
+elif pages_state == "skip":
+    lines.append(f"· GitHub Pages 未发布（缺 {token_file}）")
+
+alive = []
+if web_state == "ok" and backup_url:
+    alive.append(f"自有服务器 {backup_url}")
+if pages_state == "ok" and main_url:
+    alive.append(f"GitHub Pages {main_url}")
+if alive:
+    lines.append("")
+    lines.append("**仍在正常服务**：" + "；".join(alive))
+
+if web_state == "fail":
+    lines.append("")
+    lines.append("排查与恢复：")
+    lines.append(f"  docker ps -a | grep {container}")
+    lines.append(f"  docker logs {container} --tail 50")
+    lines.append(f"  cd {base}/deploy && docker compose up -d")
+
+if pages_state == "skip":
+    lines.append("")
+    lines.append("补一个 fine-grained PAT（仅本仓库，Contents: Read and write）写进")
+    lines.append(f"{token_file} 并 chmod 600 即可。")
+
+tail = ""
+try:
+    ls = [l.rstrip() for l in open(logfile, encoding="utf-8", errors="ignore").read().splitlines() if l.strip()]
+    tail = "\n".join(ls[-5:])
+except OSError:
+    pass
+
+msg = ("**🟡 看板有一条链路异常**\n\n"
+       "日报推送正常，但看板的双活链路其中一条出了问题：\n\n"
+       + "\n".join(lines)
+       + f"\n\n**日志尾部**\n{tail[:600]}")
 ok = collect.push_wecom_app(msg, cfg)
 print(f"[alert] 看板告警推送{'成功' if ok else '失败'}")
 PY

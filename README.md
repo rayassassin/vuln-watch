@@ -212,13 +212,31 @@ cd web && python3 -m http.server 8080      # http://localhost:8080
 表格 / 卡片两种视图、**每页 50 条分页**（顶部有紧凑翻页，底部有完整页码）、
 命中趋势图（跨度超 70 天自动按月聚合）。
 
-### 发布到 GitHub Pages
+### 两条链路：GitHub Pages + 自有服务器
 
-看板不在服务器上对外提供服务，而是发布到**本仓库自己的 `gh-pages` 分支**，
-GitHub Pages 的源就指向那个分支的根目录：
+同一份看板同时挂在两个地方，互为兜底：
 
-**https://rayassassin.github.io/vuln-watch/**
+| 链路 | 地址 | 角色 | 数据怎么过去 |
+|---|---|---|---|
+| **GitHub Pages** | https://rayassassin.github.io/vuln-watch/ | 域名备案期间的对外正式入口；全球可达，**不依赖这台服务器** | cron 每轮走 Git Data API 推 `gh-pages` 分支 |
+| **自有服务器** | 服务器 IP / 域名（nginx 容器） | 备案后的主站，可绑自己的域名与证书 | 容器只读挂载 `web/`，`collect.py` 写完即刻生效 |
 
+两条链路每轮采集后都会更新，一条挂了另一条还能看。日报尾部给哪些链接由
+`vuln-watch.yaml` 的 `web.public_url`（主入口）与 `web.backup_url`（备用入口，可空）决定；
+**域名备案完成、服务器端口放行之后，把这两个值对调即可**，其他文件不用动。
+
+```bash
+python3 scripts/healthcheck.py          # 确认两条链路都在跑、数据是同一份
+python3 scripts/healthcheck.py --json   # 机器可读，可直接接监控
+```
+
+自检不下载 4 MB：GitHub Contents API 会返回每个文件的 **git blob sha1**，
+本地用同一口径算一遍（`sha1("blob <len>\0" + content)`），相等即同一份内容。
+所以「远端是旧版」这种事，一个元数据请求就能发现。
+
+### GitHub Pages 这条链路
+
+发布到**本仓库自己的 `gh-pages` 分支**，Pages 的源就指向那个分支的根目录。
 一个仓库两用：`main` 存代码，`gh-pages` 只放 `index.html` / `data.json` / `.nojekyll`
 三个文件的孤立快照。两者历史完全隔离，不需要第二个仓库、也不需要第二份仓库权限。
 
@@ -242,8 +260,8 @@ python3 scripts/publish_pages.py --method git   # 应急：退回 git push
 3. 服务器上落盘：`echo '<token>' > /opt/vuln-watch/.pages_token && chmod 600 ...`
    （路径可用 `VW_PAGES_TOKEN_FILE` 改，见 `scripts/deploy.env.example`）
 
-没有这个文件时，cron 跳过发布，并发一条 **🟡 看板未更新** 提示（一天最多一次，
-修好后自动停止），**不影响日报推送**。
+没有这个文件时，cron 会跳过 Pages 这一条并发一条 **🟡 链路上有异常** 提示
+（一天最多一次，修好后自动停止），**不影响日报推送，也不影响自有服务器那条**。
 
 **为什么走 Git Data API 而不是 git push**：data.json 4 MB，`clone → commit → push`
 要走 pack 协议加一条长连接。实测本机代理链路报 `Error in the HTTP2 framing layer` /
@@ -257,7 +275,10 @@ python3 scripts/publish_pages.py --method git   # 应急：退回 git push
 GitHub 侧 GC 之后体积稳定在「一份快照」的量级。代价是没有历史版本可回溯，
 而这个页面本来也不需要——要历史去 state.db。
 
-另外脚本会记一个内容指纹 `.pages_state`，数据没变化就直接跳过，cron 不白跑一次 API。
+另外脚本每轮会先问一次远端（`Contents API` 拿 blob sha）再决定发不发，
+和本地内容一致就跳过，cron 不白跑。以前用本地 `.pages_state` 指纹判断，
+但那个文件不进版本库、每部署一次就丢，还会在远端被外部改过时误报「已是最新」——
+现在这个判断直接以远端事实为准。
 
 ### 回填 vs 日常，两条通道各管一段
 

@@ -998,11 +998,23 @@ def _render_item(idx: int, v: dict, full: bool = True) -> list[str]:
 
 def _dashboard_link(cfg: dict | None) -> str:
     """
-    消息尾部的全景看板入口。地址来自配置 web.public_url。
-    没配就返回空串，绝不硬编码一个可能已经挂掉的地址。
+    消息尾部的全景看板入口。
+
+    支持两个地址，理由是看板现在有两条独立链路（GitHub Pages 与自有服务器容器），
+    一条挂了另一条还能看，日报里就该同时给出，而不是等人来问「页面打不开」。
+      web.public_url  主地址（当前对外正式使用的那条）
+      web.backup_url  备用地址（可留空；留空则不渲染）
+    两个都没配就返回空串，绝不硬编码一个可能已经挂掉的地址。
     """
-    url = str(((cfg or {}).get("web") or {}).get("public_url") or "").strip()
-    return f"🌐 全景看板　{url}" if url else ""
+    web = (cfg or {}).get("web") or {}
+    main = str(web.get("public_url") or "").strip()
+    backup = str(web.get("backup_url") or "").strip()
+    lines = []
+    if main:
+        lines.append(f"🌐 全景看板　{main}")
+    if backup and backup != main:
+        lines.append(f"🔁 备用入口　{backup}")
+    return "\n".join(lines)
 
 
 def render_markdown(items: list[dict], stats: dict, cfg: dict | None = None) -> str:

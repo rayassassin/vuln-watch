@@ -169,11 +169,15 @@ backfill:
 
 # ---------- 7. 网页 ----------
 web:
-  # 全景看板地址，日报尾部会带这一行。留空则不加链接（不硬编码可能失效的地址）。
-  # 托管在本仓库自己的 gh-pages 分支（Pages 源 = gh-pages 分支根目录）。
-  # 该分支只放 index.html / data.json / .nojekyll，每次一个无父 commit 强制覆盖，
-  # 因此快照与 main 的代码历史完全隔离，仓库体积不随天数膨胀。
+  # 看板有两条独立链路，同一份数据、同一份页面：
+  #   ① GitHub Pages  —— 本仓库 gh-pages 分支，全球可达，不依赖这台服务器
+  #   ② 自有服务器   —— nginx 容器挂载 web/ 目录，域名备案后作为主站
+  # 两条链路每轮采集后都会更新（见 scripts/cron-run.sh），任一挂掉另一个还能看。
+  #
+  # public_url 是日报里给的正式入口；backup_url 是备用入口，留空则不渲染。
+  # 备案通过、域名可用之后把两者对调即可，其他地方不用改。
   public_url: "https://rayassassin.github.io/vuln-watch/"
+  backup_url: ""    # 例：http://你的域名/（备案前服务器 80/8080 从公网不可达，先留空）
 
 wecom:
   # cli      —— 走已授权的 wecom-cli 机器人（本机用）

@@ -27,6 +27,14 @@
 
 只依赖标准库（urllib / base64 / hashlib），服务器上的 python3 不必装 requests。
 
+为什么每轮先问一次远端：
+  判断「要不要发」不看本地状态文件，而是直接比 GitHub Contents API 返回的
+  文件 blob sha（就是 git blob sha1，口径完全一致）。好处：零下载（不拉 4 MB）、
+  不会因为「本地记着发过了」而漏发、远端被外部改过也能立刻发现。
+  本地曾经用 .pages_state 指纹，但那个文件不进版本库，每部署一次就丢，
+  还会在远端被改动时误报「已是最新」。cron 一天两轮，多发一次总比漏发强，
+  所以校验失败时一律当作需要发布。
+
 token：fine-grained PAT，只授权 rayassassin/vuln-watch（仓库本身），
   权限 Contents: Read and write（想让脚本自动启用 Pages 再加 Pages: Read and write）。
   注意：Pages 必须从公开仓库发布才能免费用，所以这个仓库是 public。
@@ -49,7 +57,6 @@ import base64
 import hashlib
 import json
 import os
-import shutil
 import subprocess
 import sys
 import tempfile
@@ -63,7 +70,6 @@ API = "https://api.github.com"
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_REPO = "rayassassin/vuln-watch"
 DEFAULT_BRANCH = "gh-pages"
-STATE_PATH = ROOT / ".pages_state"
 
 # 顶层 .nojekyll：GitHub 默认走 Jekyll，下划线开头的文件会被吞掉
 NOJEKYLL = (".nojekyll", b"")
@@ -87,11 +93,14 @@ def api(method: str, path: str, token: str, body: dict | None = None,
     url = path if path.startswith("http") else API + path
     payload = json.dumps(body).encode("utf-8") if body is not None else None
     headers = {
-        "Authorization": f"Bearer {token}",
         "Accept": "application/vnd.github+json",
         "X-GitHub-Api-Version": "2022-11-28",
         "User-Agent": "vuln-watch-publish",
     }
+    # 空 token = 匿名。公开仓库的只读接口不需要鉴权，
+    # scripts/healthcheck.py 在没有凭据的机器上也就能核对远端快照。
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
     if payload:
         headers["Content-Type"] = "application/json"
 
@@ -189,8 +198,12 @@ def ensure_pages(repo: str, branch: str, token: str) -> str:
         return f"[warn] 启用 Pages 失败（{exc.code}）：到仓库 Settings → Pages 手动选 {branch} 分支"
 
 
-def wait_build(repo: str, token: str, timeout: int) -> str:
-    """等 Pages 构建完，超时就算了 —— cron 里别把时间耗在这。"""
+def wait_build(repo: str, token: str, timeout: int) -> tuple[bool, str]:
+    """
+    等 Pages 构建完。返回 (是否正常, 描述)。
+    只有「构建报错」算失败；超时只告警不算失败 —— 构建慢不该触发告警，
+    GitHub 那边排队是常事，等下一轮再确认就行。
+    """
     deadline = time.time() + timeout
     last = "unknown"
     while time.time() < deadline:
@@ -198,13 +211,13 @@ def wait_build(repo: str, token: str, timeout: int) -> str:
             b = api("GET", f"/repos/{repo}/pages/builds/latest", token)
             last = b.get("status") or "unknown"
             if last == "built":
-                return f"构建完成（{b.get('duration')} ms）"
+                return True, f"构建完成（{b.get('duration')} ms）"
             if last == "errored":
-                return f"[warn] Pages 构建报错：{b.get('error', {}).get('message') or '-'}"
+                return False, f"Pages 构建报错：{(b.get('error') or {}).get('message') or '-'}"
         except ApiError as exc:
-            return f"[warn] 查询构建状态失败：{exc}"
+            return True, f"[warn] 查询构建状态失败：{exc}"
         time.sleep(10)
-    return f"[warn] 等待 {timeout}s 仍未完成，当前状态 {last}"
+    return True, f"[warn] 等待 {timeout}s 仍未完成，当前状态 {last}"
 
 
 # ---------------------------------------------------------------- 兜底：git push
@@ -271,13 +284,53 @@ def collect_files(src: Path) -> dict[str, bytes]:
 
 
 def fingerprint(files: dict[str, bytes]) -> str:
-    """内容指纹，用于跳过「数据没变化」的空发布（cron 一天两次，别白跑）。"""
+    """内容指纹，仅用于日志与 --dry-run 展示。"""
     h = hashlib.sha256()
     for name in sorted(files):
         h.update(name.encode())
         h.update(b"\0")
         h.update(files[name])
     return h.hexdigest()
+
+
+def local_blob_sha(content: bytes) -> str:
+    """
+    算 git blob sha1，口径与 GitHub Contents API 返回的 sha 完全一致：
+        sha1("blob <字节数>\\0" + content)
+    这样只看元数据就能判断「远端那份是不是和我本地这份一样」，不用下载 4 MB。
+    """
+    h = hashlib.sha1()
+    h.update(b"blob %d\0" % len(content))
+    h.update(content)
+    return h.hexdigest()
+
+
+def remote_is_current(files: dict[str, bytes], repo: str, branch: str,
+                      token: str) -> tuple[bool, str]:
+    """
+    远端 gh-pages 上每个文件的 blob sha 都和本地一致 → 不必重发。
+
+    比本地指纹文件可靠：.pages_state 不进版本库，部署一次就丢；
+    而 Pages 被外部改过、token 换过仓库时，本地指纹还会骗你说「已是最新」。
+    查不动（网络/权限问题）时一律返回 False，宁可多发一次也不要漏发。
+    """
+    diffs: list[str] = []
+    for name, content in files.items():
+        try:
+            meta = api("GET", f"/repos/{repo}/contents/{name}?ref={branch}", token) or {}
+        except ApiError as exc:
+            if exc.code == 404:
+                return False, f"远端尚无 {name}"
+            return False, f"远端校验失败（{exc.code}）"
+        except Exception as exc:  # noqa: BLE001
+            return False, f"远端校验失败（{str(exc)[:60]}）"
+        rsha = meta.get("sha") or ""
+        lsha = local_blob_sha(content)
+        if not rsha:
+            diffs.append(f"{name} 缺失")
+        elif rsha != lsha:
+            diffs.append(f"{name} 已变")
+    return (not diffs), "、".join(diffs) if diffs else "三份文件均一致"
 
 
 def main() -> int:
@@ -299,23 +352,29 @@ def main() -> int:
     size_mb = len(files["data.json"]) / 1024 / 1024
     print(f"发布源：{src} 共 {len(files)} 个文件，data.json {size_mb:.2f} MB")
 
-    fp = fingerprint(files)
     if args.dry_run:
         for name, content in sorted(files.items()):
             print(f"   {name:<12} {len(content):>9,} B")
-        print(f"   指纹 {fp[:16]}")
+        print(f"   指纹 {fingerprint(files)[:16]}")
         print("[dry-run] 未联网")
         return 0
 
-    if not args.force and STATE_PATH.exists():
-        prev = STATE_PATH.read_text(encoding="utf-8").strip()
-        if prev == fp:
-            print("内容与上次发布完全一致，跳过（--force 可强制重发）")
-            return 0
-
     token = resolve_token()
+
+    # 先问远端：真的需要发吗？cron 一天两次，绝大部分轮次其实就是这几份文件
+    if not args.force:
+        same, why = remote_is_current(files, args.repo, args.branch, token)
+        if same:
+            print(f"远端已是最新（{why}），跳过发布（--force 可强制重发）")
+            if args.wait > 0 or args.ensure_pages:
+                if args.ensure_pages:
+                    print(f"   pages → {ensure_pages(args.repo, args.branch, token)}")
+            return 0
+        print(f"远端需要更新：{why}")
+
     message = (f"publish {datetime.now().strftime('%Y-%m-%d %H:%M')} "
                f"({len(files['data.json']) // 1024} KB)")
+    build_ok = True
 
     if args.method == "git":
         print(f"git push 到 {args.repo} / {args.branch} …")
@@ -351,17 +410,14 @@ def main() -> int:
         if args.ensure_pages:
             print(f"   pages → {ensure_pages(args.repo, args.branch, token)}")
         if args.wait > 0:
-            print(f"   build → {wait_build(args.repo, token, args.wait)}")
-
-    try:
-        STATE_PATH.write_text(fp, encoding="utf-8")
-    except OSError:
-        pass  # 状态文件写不了不影响发布
+            build_ok, desc = wait_build(args.repo, token, args.wait)
+            print(f"   build → {desc}")
 
     owner, name = args.repo.split("/")
     print(f"\n✅ 已发布：https://{owner}.github.io/{name}/")
     print("   Pages 首次构建要 1-2 分钟，之后每次发布约 30 秒生效")
-    return 0
+    # 构建报错时给非 0：cron 靠退出码判断「这套环境到底更新了没有」
+    return 0 if build_ok else 2
 
 
 if __name__ == "__main__":
