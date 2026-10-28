@@ -463,7 +463,7 @@
               <th>CVE</th>
               <th class="sortable sorted" data-sort="newest">发布日期</th>
               <th>组件</th>
-              <th class="hide-md">厂商</th>
+              <th class="hide-xs">厂商</th>
               <th class="hide-sm">描述</th>
               <th class="sortable" data-sort="cvss-desc">CVSS</th>
               <th class="sortable" data-sort="epss-desc">EPSS</th>
@@ -598,7 +598,7 @@ function flagTags(e) {
   return t.join("") || `<span class="tag none">—</span>`;
 }
 
-/* 组件的悬浮提示：窄屏会把厂商列隐藏掉，这里把「厂商 / 产品」补全 */
+/* 组件的悬浮提示：极窄屏（≤560px）会把厂商列隐藏掉，这里把「厂商 / 产品」补全 */
 function compTitle(e) {
   const c = e.component || "", v = e.vendor || "";
   if (c && v && v.toLowerCase() !== c.toLowerCase()) return `${v} / ${c}`;
@@ -614,7 +614,7 @@ function renderTable(list) {
       <td class="cve-id">${esc(e.cve)}</td>
       <td style="color:var(--text-2);white-space:nowrap">${fmtDate(e.published)}</td>
       <td class="comp-name" style="max-width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${compTitle(e)}">${esc(e.component || "—")}</td>
-      <td class="hide-md" style="max-width:110px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text-3)" title="${esc(e.vendor || "")}">${esc(e.vendor || "—")}</td>
+      <td class="hide-xs" style="max-width:110px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text-2)" title="${esc(e.vendor || "")}">${esc(e.vendor || "—")}</td>
       <td class="model-title hide-sm" title="${esc(e.title || "")}">${esc((e.title || "").slice(0, 56))}</td>
       <td class="cvss-num">${cvssText(e)}</td>
       <td class="cvss-num">${e.epss > 0 ? (e.epss * 100).toFixed(0) + "%" : "—"}</td>

@@ -1022,6 +1022,13 @@ def _component_name(v: dict) -> str:
     prod = v.get("product") or ""
     if prod:
         return _pretty_name(prod)
+    # 1.5 Oracle 的 CPU 标题自带产品名：「Vulnerability in the Workflow product
+    #     of Oracle E-Business Suite」。这类公告经常没有 CPE，标题是唯一的产品线索。
+    o_vendor, o_prod = _oracle_title_vp(v.get("title") or "")
+    if o_prod:
+        # 标题里的产品名本来就是人写的（JD Edwards EnterpriseOne），
+        # 再过一遍 _pretty_name 会把驼峰打成 Enterpriseone，这里原样返回。
+        return o_prod
     # 2. OSV / GitHub 的资产坐标，包名本身就是产品
     for asset in v.get("assets", []):
         short = _asset_short(asset)
@@ -1052,20 +1059,124 @@ def _component_name(v: dict) -> str:
     return ""
 
 
+# Oracle 的 CPU 公告标题是固定句式，且相当一部分条目 NVD 没给 CPE：
+#   "Vulnerability in the Workflow product of Oracle E-Business Suite (component: Workflow)"
+# 产品名就在 the ... product of Oracle 之间，厂商必然是 Oracle。
+ORACLE_TITLE_RE = re.compile(r"vulnerability in the\s+(.+?)\s+product of\s+oracle", re.I)
+
+# 代码托管平台：域名后面第一段才是组织名，域名本身不是厂商
+FORGE_HOSTS = {
+    "github.com", "gitlab.com", "bitbucket.org", "gitea.com", "codeberg.org",
+    "gopkg.in", "sr.ht", "git.sr.ht",
+}
+# 自托管域名里的前缀子域不算组织名：code.gitea.io 的厂商是 Gitea 不是 Code
+_DOMAIN_DROP = {"www", "code", "api", "git", "go", "pkg", "src", "lab", "vcs", "dev"}
+
+# OSV / GitHub 资产坐标的生态前缀，拆组织名之前要先剥掉，否则会把 Go、PyPI 当成厂商
+ECO_PREFIX = {
+    "go", "npm", "pypi", "maven", "packagist", "nuget", "rust", "crates.io",
+    "rubygems", "gem", "composer", "hex", "pub", "swift", "linux", "debian",
+    "alpine", "android", "ubuntu", "rocky", "alma", "rhel", "suse",
+}
+
+# 包名组织前缀 -> 人能读的组织名。只在机械首字母大写明显难看时才登记。
+ORG_ALIAS = {
+    "getgrav": "Grav", "league": "The PHP League", "thorsten": "phpMyFAQ",
+    "runatlantis": "Atlantis", "siyuan-note": "SiYuan", "gtsteffaniak": "FileBrowser",
+    "budibase": "Budibase", "craftcms": "Craft CMS", "mantisbt": "MantisBT",
+    "thephpleague": "The PHP League", "php": "PHP",
+}
+
+
+def _domain_label(host: str) -> str:
+    """自托管代码域名 -> 组织名。code.gitea.io → gitea，code.vikunja.io → vikunja。"""
+    labels = [l for l in (host or "").lower().split(".") if l and l not in _DOMAIN_DROP]
+    return labels[0] if labels else ""
+
+
+def _oracle_title_vp(title: str) -> tuple[str, str]:
+    """Oracle CPU 标题 -> (vendor, product)。匹配不上就返回空串，绝不硬猜。"""
+    m = ORACLE_TITLE_RE.search(title or "")
+    if not m:
+        return "", ""
+    prod = m.group(1).strip().strip(".")
+    # 偶发 "Vulnerability in the Oracle X product of Oracle Y" 里产品名带 Oracle 前缀，保留：
+    # 这本来就是产品全名（Oracle Communications BRM - Elastic Charging Engine）
+    return "Oracle", prod
+
+
+def _pkg_org_product(name: str) -> tuple[str, str]:
+    """
+    带命名空间的包名 -> (组织, 产品)。拆不出组织就返回空串，不去猜裸包名。
+
+      github.com/siyuan-note/siyuan/kernel → (siyuan-note, siyuan)
+      code.gitea.io/gitea                 → (gitea, gitea)   自托管域名取主标签
+      getgrav/grav                        → (getgrav, grav)
+      @budibase/server                    → (budibase, server)  npm scope
+      Go/github.com/org/repo              → (org, repo)        先剥生态前缀
+      django                              → ("", "")          裸包名没有组织信息
+    """
+    if not name or "/" not in name:
+        return "", ""
+    # 生态坐标有两种写法：PyPI:django 与 Go/github.com/org/repo，先把生态名剥掉
+    if ":" in name:
+        name = name.split(":", 1)[1]
+    parts = [p for p in name.split("/") if p]
+    while len(parts) > 1 and parts[0].lower() in ECO_PREFIX:
+        parts.pop(0)
+    if len(parts) < 2:
+        return "", ""
+    first = parts[0]
+    if first.startswith("@"):                       # npm scope: @budibase/server
+        return first[1:].strip(), parts[1]
+    if "." in first:                                # 带域名的坐标
+        host = first.lower()
+        if len(parts) >= 3:                         # github.com/org/repo...
+            return parts[1], parts[2]
+        if host in FORGE_HOSTS:                     # github.com/django 这种只有两段，判不出组织
+            return "", ""
+        label = _domain_label(host)                 # code.gitea.io/gitea
+        return label, parts[1]
+    return first, parts[1]                          # org/repo
+
+
 def _vendor_name(v: dict) -> str:
     """
     条目的**厂商名**，即 CPE 里的 Vendor，例如 oracle、apache、microsoft。
 
-    只有真正拿到厂商证据才返回，不用产品名反推，也不拿 CNA 邮箱顶替——
-    CNA 归属只能说明"谁发的这个号"，不等于"谁的产品出了问题"。
+    优先用硬证据（CPE / KEV），拿不到再退化到两条弱证据：
+      1. Oracle CPU 标题句式——厂商必为 Oracle
+      2. 包名的组织前缀——github.com/org/repo 的 org、npm 的 @scope
+    不用产品名反推，也不拿 CNA 邮箱顶替——CNA 归属只能说明"谁发的这个号"，
+    不等于"谁的产品出了问题"。裸包名（django、litellm）没有组织信息，宁可留空。
     """
     ven = v.get("vendor") or ""
     if ven:
         return _pretty_name(ven)
     if v.get("kev_vendor"):
         return str(v["kev_vendor"]).strip()
+    # 弱证据 1：Oracle CPU 标题
+    o_vendor, _ = _oracle_title_vp(v.get("title") or "")
+    if o_vendor:
+        return o_vendor
+    # 弱证据 2：包名的组织前缀（github.com/org/repo、@scope/pkg、getgrav/grav）
+    for asset in v.get("assets", []):
+        org, _prod = _pkg_org_product(asset)
+        if org:
+            return _org_name(org)
     # 资产坐标的生态前缀（PyPI/npm/maven）不是厂商，这里宁可留空
     return ""
+
+
+def _org_name(raw: str) -> str:
+    """组织名美化：先查别名表，再退到首字母大写。"""
+    key = (raw or "").strip().lower()
+    if not key:
+        return ""
+    if key in ORG_ALIAS:
+        return ORG_ALIAS[key]
+    return " ".join(w if (w.isupper() or w.isdigit()) else w.capitalize()
+                    for w in re.sub(r"[-_.]+", " ", key).split())
 
 
 def _short_action(text: str) -> str:
