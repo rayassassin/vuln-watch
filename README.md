@@ -156,21 +156,62 @@ python3 scripts/deploy.py
 ## 网页可视化（web/）
 
 除企业微信推送外，`collect.py` 每次运行还会把命中条目导出到 `web/data.json`，
-由 `web/index.html` 渲染成深色风格的情报看板（仿腾讯漏洞情报 tvi.tencent.com 的视觉语言）。
+由 `web/index.html` 渲染成情报全景看板（浅色主题，视觉参照 ai-radix 的全景页）。
 
 ```bash
-# 生成数据后，本地起个静态服务预览
-python3 collect.py --dry-run --days 1      # 产出 web/data.json
-cd web && python3 -m http.server 8080      # 打开 http://localhost:8080
+# 首次：回填最近一年，页面才有"全景"可看
+python3 collect.py --backfill 365
+
+# 之后每次日常运行都会把新命中合并进同一份 data.json
+python3 collect.py --dry-run --days 1
+
+# 本地预览
+cd web && python3 -m http.server 8080      # http://localhost:8080
 ```
 
-页面包含：统计条（今日新增 / P0 / P1 / P2）、最新漏洞卡片（分级色、KEV、EPSS、影响/条件/范围）、
-近 14 天命中趋势图、数据源状态与故障告警。
+页面包含：统计条（收录量 / P0 / P1 / KEV）、时间范围筛选（7/30/90/365 天）、
+分级与标签筛选、组件筛选、搜索、排序、表格 / 卡片两种视图、命中趋势图（跨度超 70 天自动按月聚合）。
+
+### 回填 vs 日常，两条通道各管一段
+
+| | `--backfill N` | 日常运行 |
+|---|---|---|
+| 目的 | 给全景页灌历史基数 | 发现新漏洞并推送 |
+| NVD 时间字段 | `pubStartDate`（按发布时间） | `lastModStartDate`（按修改时间） |
+| 时间区间 | 昨天 00:00 往前推 N 天 | 上次运行至今，上限 1 天 |
+| 推送 | **不推送** | 推送企业微信 |
+| `state.db` 水位 | **不写、不 mark_seen** | 成功才推进 |
+| `stale_days` | 关闭（否则一年数据全被过滤） | 2 天 |
+| 关键词粗筛 | 默认关闭（按订阅的 CNA 全量收录） | 开启 |
+| 配额截断 | 不截断（仅 6000 条兜底） | P0:5 / P1:4 / P2:4 |
+
+**为什么回填不写水位、不 mark_seen**：回填会把整整一年的漏洞标成「已读」，
+第二天真有新漏洞时日常任务就把它当旧的漏掉了。区间也只取到昨天 00:00，
+今天产生的留给日常任务推送，两边不重不漏。
+
+### data.json 格式（v2）
+
+单对象，不再是「每天一个快照」的数组：
+
+```
+{
+  format: 2, generated_at, mode: "backfill" | "daily",
+  range: {from, to},                     // 按发布日期
+  stats: {total, p0, p1, p2, kev, exact, scanned, new_this_run},
+  last_run: {date, hit, p0, p1, p2},     // 只反映最近一次运行
+  sources: [], degraded: [],
+  daily: [{date, hit, p0, p1, p2}],      // 按发布日期分桶，给趋势图用
+  entries: [{cve, level, cvss, epss, kev, component, impact, ...}]
+}
+```
+
+按 CVE 去重合并：回填和日常巡检都抓到同一条时，保留信息更全的一份，
+分级取更严重的那个。保留窗口 400 天（`backfill.retention_days`）。
 
 设计要点：
 - 纯只读旁路，不碰推送与 `state.db` 水位；网页挂了不影响日报
 - `web/data.json` 由脚本现场生成，**不入库**（`.gitignore` 已排除），服务器/本机各自维护
-- 保留近 30 天历史，网页能看到趋势而不只是当天一条
+- 旧版「按天数组」格式仍能读入，升级不丢已攒的历史
 
 ## 凭证与配置安全
 
