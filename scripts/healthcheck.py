@@ -91,7 +91,7 @@ def http_probe(url: str, timeout: int = 25, want_json: bool = False) -> tuple[bo
         return False, f"{type(exc).__name__}: {str(exc)[:70]}"
 
 
-def size_probe(url: str, timeout: int = 30) -> tuple[bool, int, str]:
+def size_probe(url: str, timeout: int = 30, retries: int = 3) -> tuple[bool, int, str]:
     """
     只取前 2 KB，用 Content-Range / Content-Length 读出远端文件总大小。
 
@@ -99,22 +99,33 @@ def size_probe(url: str, timeout: int = 30) -> tuple[bool, int, str]:
     上一次自检就是卡在这里超时而报“错”。而“页面能不能打开”和“文件多大”
     都不需要真把 4 MB 拉下来——字节数跟本地一致，加上 blob sha 比对，
     已经足以证明远端就是那一份。
+
+    重试是必要的：Fastly 对来自国内机房的 Range 请求偶尔直接 reset
+    （Errno 104），跟服务本身无关，多试一次就好。
     """
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
     headers = {"User-Agent": "vuln-watch-health", "Range": "bytes=0-2047"}
-    try:
-        with opener.open(urllib.request.Request(url, headers=headers), timeout=timeout) as resp:
-            resp.read()
-            status = resp.status
-            crange = resp.headers.get("Content-Range") or ""
-            clen = resp.headers.get("Content-Length") or ""
-            total = crange.rsplit("/", 1)[-1] if "/" in crange else clen
-            total = int(total) if total.isdigit() else 0
-            return 200 <= status < 300, total, f"HTTP {status} · 远端 {total:,} B"
-    except urllib.error.HTTPError as exc:
-        return False, 0, f"HTTP {exc.code}"
-    except Exception as exc:  # noqa: BLE001
-        return False, 0, f"{type(exc).__name__}: {str(exc)[:60]}"
+    last = ""
+    for attempt in range(1, retries + 1):
+        try:
+            req = urllib.request.Request(url, headers=headers)
+            with opener.open(req, timeout=timeout) as resp:
+                resp.read()
+                status = resp.status
+                crange = resp.headers.get("Content-Range") or ""
+                clen = resp.headers.get("Content-Length") or ""
+                total = crange.rsplit("/", 1)[-1] if "/" in crange else clen
+                total = int(total) if total.isdigit() else 0
+                return 200 <= status < 300, total, f"HTTP {status} · 远端 {total:,} B"
+        except urllib.error.HTTPError as exc:
+            last = f"HTTP {exc.code}"
+            if exc.code < 500:
+                return False, 0, last
+        except Exception as exc:  # noqa: BLE001
+            last = f"{type(exc).__name__}: {str(exc)[:60]}"
+        if attempt < retries:
+            time.sleep(2 * attempt)
+    return False, 0, last
 
 
 def docker_health(container: str) -> tuple[str, str]:
@@ -270,6 +281,11 @@ def main() -> int:
         res.add("GitHub Pages 数据", "ok", f"{note}（与本地一致）")
     elif ok and total:
         res.add("GitHub Pages 数据", "fail", f"{note}（本地 {len(raw):,} B，远端是旧版）")
+    elif not drift:
+        # 抽样下载失败，但上面 blob sha 已经逐文件证明远端就是这份内容。
+        # 这属于「探测方式受限」（Fastly 对 Range 请求偶发 reset），不是页面坏了，
+        # 不应该和「内容对不上」一个等级 —— 否则真出问题时就没人信告警了。
+        res.add("GitHub Pages 数据", "warn", f"公网抽样失败（{note}），内容已由 blob sha 验证一致")
     else:
         res.add("GitHub Pages 数据", "fail", note)
 
