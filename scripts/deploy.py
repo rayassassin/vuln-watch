@@ -15,6 +15,9 @@
     python3 scripts/deploy.py --check      # 只检查配置与连通性，不传文件
     python3 scripts/deploy.py --restart    # 同步后跑一次 --status 自检
 
+注意：每次连接之间会间隔 MIN_GAP 秒（默认 3.5，可用 VW_SSH_MIN_GAP 调），
+  原因是服务器上有「60 秒内 20 个新连接就丢包」的防暴破规则。
+
 配置来源（后者覆盖前者）：
     1. 本机凭据文件：$VW_SECRETS_FILE，默认 ~/.config/vuln-watch/deploy.env
     2. 进程环境变量
@@ -28,6 +31,7 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -35,6 +39,13 @@ EXPECT = ROOT / "scripts" / "remote_put.exp"
 DEFAULT_SECRETS = Path.home() / ".config" / "vuln-watch" / "deploy.env"
 
 REQUIRED = ("VW_SSH_HOST", "VW_SSH_PORT", "VW_SSH_USER", "VW_SSH_PASS")
+
+# 服务器上有一条 ipset/recent 防暴破规则：60 秒内到 SSH 端口的新连接超过 20 个
+# 直接把来源 IP 的 SYN 丢掉，表现为 ping 通、但所有 TCP 端口连不上，60 秒后自动恢复。
+# 排查问题时连着跑十条命令就能踩到，很容易被误判成「服务器挂了」或「被封 IP」。
+# 这里给每次建立连接之间留个间隔，正常部署只多花几秒，换掉一整轮误诊。
+MIN_GAP = float(os.environ.get("VW_SSH_MIN_GAP") or 3.5)
+_last_connect = 0.0
 
 
 def load_config() -> dict[str, str]:
@@ -72,8 +83,14 @@ def load_config() -> dict[str, str]:
 
 
 def run_expect(cfg: dict, *args: str) -> int:
+    global _last_connect
     if not EXPECT.exists():
         sys.exit(f"缺少 {EXPECT}")
+    if _last_connect:
+        wait = MIN_GAP - (time.monotonic() - _last_connect)
+        if wait > 0:
+            time.sleep(wait)
+    _last_connect = time.monotonic()
     env = dict(os.environ)
     env.update({k: cfg[k] for k in REQUIRED})
     proc = subprocess.run(["expect", "-f", str(EXPECT), *args],
