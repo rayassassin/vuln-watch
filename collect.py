@@ -282,6 +282,17 @@ def _parse_nvd_raw(raw: list[dict], src_label: str) -> list[dict]:
     return items
 
 
+# NVD 抓取失败的源标签（模块级累积，供 main 收进 degraded 告警）。
+# 为什么用全局而不用返回值：fetch_nvd_by_cna / fetch_nvd_keyword 的签名被
+# 回填通道（fetch_nvd_window）复用，改返回值会波及十几个调用点；
+# 而"哪个源失败了"对回填不敏感（回填失败会整体报错），只对日常巡检有意义。
+_NVD_FAILED: set[str] = set()
+
+
+def _nvd_failures() -> list[str]:
+    return sorted(_NVD_FAILED)
+
+
 def _nvd_paged(
     cfg: dict, extra: dict, label: str, since: datetime, until: datetime,
     date_field: str = "lastMod", page_size: int = 200, max_pages: int = 30,
@@ -321,6 +332,7 @@ def _nvd_paged(
             ).json()
         except Exception as exc:  # noqa: BLE001
             log(f"  ! NVD 失败 {label} p{page + 1}：{exc}")
+            _NVD_FAILED.add(label)
             break
         if total is None:
             total = int(data.get("totalResults", 0) or 0)
@@ -1971,6 +1983,7 @@ def main() -> int:
             pass
     log(f"采集窗口：{since.strftime('%Y-%m-%d %H:%M')} UTC 起（上限 {days} 天）")
 
+    _NVD_FAILED.clear()  # 每次采集重新记账，避免同进程多轮累积
     raw: list[dict] = []
 
     # 1) NVD 双通道：CNA 厂商全家桶 + 关键词（覆盖 nginx/postgresql 这类无自家 CNA 的产品）
@@ -2048,6 +2061,8 @@ def main() -> int:
             degraded.append("OSV 全部失败，组件精确匹配未生效")
         else:
             degraded.append(f"OSV {len(osv_failed)}/{len(assets_all)} 个组件失败")
+    if _nvd_failures():
+        degraded.append("NVD 源失败：" + "、".join(_nvd_failures()))
 
     stats = {
         "scanned": total_scanned,
