@@ -8,8 +8,15 @@
 github.com:443。但 api.github.com 是通的（发布 gh-pages 一直走这里）。
 所以用 Git Data API 复刻一次 fast-forward push：
 
-  拿远端 main 的 tree 当 base_tree → 上传改动文件的 blob → 生成新 tree →
-  建「带父节点」的 commit → PATCH main ref（force=False 保证不会意外覆盖别人）。
+  拿远端 main 的 tree（递归）→ 和本地 HEAD 的 tree 逐文件比对 →
+  只上传新增/变化的 blob → 生成新 tree（base_tree = 远端旧树）→
+  建「带父节点」的 commit → PATCH main ref（force=False 保证不覆盖别人）。
+
+为什么对比「远端 tree」而不是 git diff：
+  用 git diff 需要本地有远端的 commit/tree 对象；本机 push 失败时往往
+  git fetch 也被同一个代理挡掉，本地根本没有远端对象。用 API 直接拉
+  远端的 tree 清单，再和本地工作区算出来的 blob sha 对比，完全脱离本地
+  git 对远端对象的依赖，任何状态下都能算出「到底该传哪几个文件」。
 
 和 publish_pages.py 的区别：
   publish_pages 是「孤立 commit + 完整快照」，推到 gh-pages 分支；
@@ -27,7 +34,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-import publish_pages as pp  # noqa: E402  复用 api / blob / tree 的口径
+import publish_pages as pp  # noqa: E402  复用 api / blob / local_blob_sha
 
 REPO = "rayassassin/vuln-watch"
 BRANCH = "main"
@@ -55,11 +62,22 @@ def local_head() -> str:
                           capture_output=True, text=True, check=True).stdout.strip()
 
 
-def changed_files(base: str) -> list[tuple[str, str]]:
-    """本地 HEAD 相对 base 的变化，返回 (状态, 路径)。状态 M/A/D。"""
-    out = subprocess.run(["git", "diff", "--name-status", base, "HEAD"],
-                         cwd=ROOT, capture_output=True, text=True, check=True).stdout
-    return [tuple(line.split("\t")) for line in out.splitlines() if "\t" in line]
+def local_tree() -> dict[str, tuple[str, bytes]]:
+    """本地 HEAD 的 {路径: (blob_sha, 内容)}。只含 git 跟踪的文件。"""
+    paths = subprocess.run(["git", "ls-tree", "-r", "--name-only", "HEAD"],
+                           cwd=ROOT, capture_output=True, text=True,
+                           check=True).stdout.split()
+    out: dict[str, tuple[str, bytes]] = {}
+    for p in paths:
+        data = (ROOT / p).read_bytes()
+        out[p] = (pp.local_blob_sha(data), data)
+    return out
+
+
+def remote_tree(tree_sha: str, token: str) -> dict[str, str]:
+    """远端某 tree 的 {路径: blob_sha}。递归拉一次。"""
+    data = pp.api("GET", f"/repos/{REPO}/git/trees/{tree_sha}?recursive=1", token)
+    return {e["path"]: e["sha"] for e in data.get("tree", []) if e.get("type") == "blob"}
 
 
 def main() -> int:
@@ -77,30 +95,30 @@ def main() -> int:
         return 0
     old_tree = pp.api("GET", f"/repos/{REPO}/git/commits/{old_sha}", token)["tree"]["sha"]
 
-    changes = changed_files(old_sha)
-    if not changes:
-        print("没有文件变化（可能只是 commit message 不同）")
-        return 0
+    remote = remote_tree(old_tree, token)
+    local = local_tree()
 
     entries: list[dict] = []
-    for status, path in changes:
-        p = ROOT / path
-        if status == "D":
-            entries.append({"path": path, "mode": "100644", "type": "blob", "sha": None})
-        elif p.exists():
-            blob = pp.make_blob(REPO, p.read_bytes(), token)
-            mode = "100755" if p.stat().st_mode & 0o111 else "100644"
+    changed: list[str] = []
+    for path, (lsha, data) in local.items():
+        if remote.get(path) != lsha:
+            blob = pp.make_blob(REPO, data, token)
+            mode = "100755" if (ROOT / path).stat().st_mode & 0o111 else "100644"
             entries.append({"path": path, "mode": mode, "type": "blob", "sha": blob})
-        else:
-            print(f"跳过无法处理的 {status} {path}")
+            changed.append("+" + path)
+    for path in remote:
+        if path not in local:
+            entries.append({"path": path, "mode": "100644", "type": "blob", "sha": None})
+            changed.append("-" + path)
+
     if not entries:
-        print("没有可上传的文件")
+        print("内容无差异（本地与远端 tree 相同），无需推送")
         return 0
 
     msg = subprocess.run(["git", "log", "-1", "--format=%s", "HEAD"], cwd=ROOT,
                          capture_output=True, text=True, check=True).stdout.strip()
     print(f"main: {old_sha[:7]} → {head[:7]}  「{msg}」")
-    print(f"  改动 {len(changes)} 个文件：{'、'.join(s for _, s in changes)}")
+    print(f"  变化 {len(changed)} 项：{'、'.join(changed)}")
     if args.dry_run:
         print("--dry-run：未推送")
         return 0

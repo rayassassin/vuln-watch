@@ -260,9 +260,11 @@ def main() -> int:
     report["version"] = {"server": local_ver, "github": head}
     if herr:
         log(f"代码版本：查不到 GitHub main（{herr}）")
-    elif head and local_ver and head != local_ver:
+    elif head and local_ver and not local_ver.startswith(head):
+        # .version 可能是完整 40 位 sha，GitHub 返回的是 7 位短 sha，
+        # 用前缀比对，避免两者长度不一致导致恒判「落后」的误报。
         report["alerts"].append(
-            f"服务器代码 {local_ver} 落后 GitHub main {head}，"
+            f"服务器代码 {local_ver[:7]} 落后 GitHub main {head}，"
             f"本机跑 `python3 scripts/deploy.py` 同步")
     log(f"代码版本：服务器 {local_ver or '?'} / GitHub {head or '?'}")
 
