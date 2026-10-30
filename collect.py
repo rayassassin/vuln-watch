@@ -1204,20 +1204,56 @@ def _short_action(text: str) -> str:
     return t[:90] + ("…" if len(t) > 90 else "")
 
 
+def _md_link(text: str, url: str, bold: bool = True) -> str:
+    """
+    企业微信 markdown 的可点链接。文字即链接文本，不另起一行贴裸 URL——
+    一条消息里塞十几个裸地址既难看，也顶不动 2048 字节的额度。
+    """
+    url = (url or "").strip()
+    if not url:
+        return f"**{text}**" if bold else text
+    return f"**[{text}]({url})**" if bold else f"[{text}]({url})"
+
+
+def _vp_label(v: dict, limit: int = 28) -> str:
+    """
+    「厂商 / 组件」标签。列表里光有编号等于没信息：得让人一眼看出是哪家的
+    哪个产品，才知道跟自己有没有关系。厂商与产品相同时只留一个，避免
+    「Oracle / Oracle」这种废话。
+
+    两样都取不到时退回标题片段——宁可给一句人话，也不留一个只有编号的孤儿。
+    """
+    comp = _component_name(v)
+    ven = _vendor_name(v)
+    if comp and len(comp) > limit:
+        comp = comp[:limit].rstrip() + "…"
+    if ven and comp:
+        return f"{ven} / {comp}" if ven.lower() != comp.lower() else comp
+    if comp or ven:
+        return comp or ven
+    title = (v.get("title") or "").strip()
+    if title:
+        return title[:limit] + ("…" if len(title) > limit else "")
+    return ""
+
+
+def _item_head(idx: int, v: dict) -> str:
+    """条目标题行：编号本身是可点链接，后面跟「厂商 / 组件」。"""
+    cve = v["cve"] or v["key"]
+    head = _md_link(f"{idx}. {cve}", v.get("url", ""))
+    label = _vp_label(v)
+    return f"{head} · {label}" if label else head
+
+
 def _render_item(idx: int, v: dict, full: bool = True) -> list[str]:
     """
     单条漏洞的多行描述。信息密度优先，但不堆砌。
 
-    full=True 用于 P0/P1：影响 + 条件 + 范围 + 处置 + 链接
+    full=True 用于 P0：影响 + 条件 + 范围 + 处置
     full=False 用于紧凑列表：只留影响与条件各一行，把篇幅让给条数
+    详情链接已并入编号（点编号直达原文），不再单占一行。
     """
-    cve = v["cve"] or v["key"]
-    comp = _component_name(v)
-    ven = _vendor_name(v)
-    head = f"**{idx}. {cve}**"
-    if comp:
-        # 只写产品名会让人分不清是谁家的，厂商放括号里做注脚
-        head += f" · {comp}（{ven}）" if ven and ven.lower() != comp.lower() else f" · {comp}"
+    head = _item_head(idx, v)
 
     # 第二行：分数 + 关键标签
     cvss_str = f"CVSS {v['cvss']:.1f}" if v.get("cvss_exact") else f"CVSS≈{v['cvss']:.1f}"
@@ -1243,9 +1279,7 @@ def _render_item(idx: int, v: dict, full: bool = True) -> list[str]:
         lines.append(f"　▸ {v['attack_cond']}")
 
     if not full:
-        # 紧凑模式到此为止，链接附在行尾省一行
-        if v["url"]:
-            lines.append(f"　▸ [详情]({v['url']})")
+        # 紧凑模式到此为止；详情入口已并入编号，不再多占一行
         return lines
 
     # 受影响范围
@@ -1257,8 +1291,6 @@ def _render_item(idx: int, v: dict, full: bool = True) -> list[str]:
     action = _short_action(v.get("cisa_action", ""))
     if action:
         lines.append(f"　▸ 处置：{action}")
-    if v["url"]:
-        lines.append(f"　▸ [详情]({v['url']})")
     return lines
 
 
@@ -1276,10 +1308,12 @@ def _dashboard_link(cfg: dict | None) -> str:
     main = str(web.get("public_url") or "").strip()
     backup = str(web.get("backup_url") or "").strip()
     lines = []
+    # 企业微信 markdown 的字体颜色只有三档（info 绿 / comment 灰 / warning 橙红），
+    # 没有纯红，"warning" 是最接近红色的那一档。文字本身作为链接文本，不另贴裸地址。
     if main:
-        lines.append(f"🌐 全景看板　{main}")
+        lines.append(f'<font color="warning">**[🌐 漏洞情报全景看板]({main})**</font>')
     if backup and backup != main:
-        lines.append(f"🔁 备用入口　{backup}")
+        lines.append(f'<font color="warning">**[🔁 备用入口]({backup})**</font>')
     return "\n".join(lines)
 
 
@@ -1327,11 +1361,14 @@ def render_markdown(items: list[dict], stats: dict, cfg: dict | None = None) -> 
             lines += _render_item(idx, v, full=False)
             lines.append("")
 
-    # P2 只列编号，不占篇幅
+    # 观察列表：编号带链接 + 「厂商 / 组件」，只列编号等于让人去搜
     if p2:
-        names = "、".join((x["cve"] or x["key"]) for x in p2[:8])
-        more = f" 等 {len(p2)} 条" if len(p2) > 8 else ""
-        lines += [SEP, "", f"**🟡 观察列表**　{names}{more}", ""]
+        lines += [SEP, "", f"**🟡 观察列表（{len(p2)} 条）**", ""]
+        for v in p2:
+            label = _vp_label(v)
+            row = "　" + _md_link(v["cve"] or v["key"], v.get("url", ""), bold=False)
+            lines.append(f"{row} · {label}" if label else row)
+        lines.append("")
 
     link = _dashboard_link(cfg)
     if link:
@@ -1400,9 +1437,9 @@ def render_patrol(stats: dict, cfg: dict | None = None) -> str:
         "> 有新增漏洞才会推送给可见范围内所有人。",
     ]
     if main:
-        lines.append(f"> [打开全景看板]({main})")
+        lines.append(f'> <font color="warning">**[🌐 漏洞情报全景看板]({main})**</font>')
     if backup:
-        lines.append(f"> 备用入口 {backup}")
+        lines.append(f'> 🔁 备用入口 <font color="warning">**[打开备用]({backup})**</font>')
     return "\n".join(lines)
 
 
