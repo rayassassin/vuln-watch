@@ -1294,6 +1294,19 @@ def _render_item(idx: int, v: dict, full: bool = True) -> list[str]:
     return lines
 
 
+def _red(text: str) -> str:
+    """
+    企业微信 markdown 的字体颜色只有三档（info 绿 / comment 灰 / warning 橙红），
+    没有纯红，warning 是最接近红色的那一档。
+
+    极个别老通道不认 <font> 标签，会把标签当文本原样吐出来。
+    真遇到就把环境变量 VW_NO_FONT_COLOR=1 打开，退回纯加粗，其余不动。
+    """
+    if os.environ.get("VW_NO_FONT_COLOR", "").strip().lower() in ("1", "true", "yes", "on"):
+        return text
+    return f'<font color="warning">{text}</font>'
+
+
 def _dashboard_link(cfg: dict | None) -> str:
     """
     消息尾部的全景看板入口。
@@ -1311,9 +1324,9 @@ def _dashboard_link(cfg: dict | None) -> str:
     # 企业微信 markdown 的字体颜色只有三档（info 绿 / comment 灰 / warning 橙红），
     # 没有纯红，"warning" 是最接近红色的那一档。文字本身作为链接文本，不另贴裸地址。
     if main:
-        lines.append(f'<font color="warning">**[🌐 漏洞情报全景看板]({main})**</font>')
+        lines.append(_red(f"**[🌐 漏洞情报全景看板]({main})**"))
     if backup and backup != main:
-        lines.append(f'<font color="warning">**[🔁 备用入口]({backup})**</font>')
+        lines.append(_red(f"**[🔁 备用入口]({backup})**"))
     return "\n".join(lines)
 
 
@@ -1437,9 +1450,9 @@ def render_patrol(stats: dict, cfg: dict | None = None) -> str:
         "> 有新增漏洞才会推送给可见范围内所有人。",
     ]
     if main:
-        lines.append(f'> <font color="warning">**[🌐 漏洞情报全景看板]({main})**</font>')
+        lines.append("> " + _red(f"**[🌐 漏洞情报全景看板]({main})**"))
     if backup:
-        lines.append(f'> 🔁 备用入口 <font color="warning">**[打开备用]({backup})**</font>')
+        lines.append("> 🔁 备用入口 " + _red(f"**[打开备用]({backup})**"))
     return "\n".join(lines)
 
 
