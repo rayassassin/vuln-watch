@@ -1215,25 +1215,49 @@ def _md_link(text: str, url: str, bold: bool = True) -> str:
     return f"**[{text}]({url})**" if bold else f"[{text}]({url})"
 
 
-def _vp_label(v: dict, limit: int = 28) -> str:
+def _clip(text: str, limit: int) -> str:
+    """按词边界截断，别把 `Trigger.dev before 4.5.6` 切成 `... sel…` 这种断词。"""
+    text = (text or "").strip()
+    if len(text) <= limit:
+        return text
+    cut = text[:limit]
+    space = cut.rfind(" ")
+    if space >= limit * 0.6:          # 空格太靠前就认了，按字数硬切
+        cut = cut[:space]
+    return cut.rstrip(" ,.;:-") + "…"
+
+
+def _vp_label(v: dict, limit: int = 34) -> str:
     """
     「厂商 / 组件」标签。列表里光有编号等于没信息：得让人一眼看出是哪家的
-    哪个产品，才知道跟自己有没有关系。厂商与产品相同时只留一个，避免
-    「Oracle / Oracle」这种废话。
+    哪个产品，才知道跟自己有没有关系。
 
+    重复信息一律压掉：产品名自带厂商前缀（Oracle WebLogic Server）就只留产品，
+    产品与厂商同名（Oracle / Oracle）就只留一个。
     两样都取不到时退回标题片段——宁可给一句人话，也不留一个只有编号的孤儿。
     """
     comp = _component_name(v)
     ven = _vendor_name(v)
-    if comp and len(comp) > limit:
-        comp = comp[:limit].rstrip() + "…"
+    # 包名坐标漏网时（dolibarr/dolibarr、phpoffice/php），产品段是最后一级
+    if "/" in comp:
+        tail = comp.rsplit("/", 1)[-1].strip()
+        if tail:
+            comp = tail
+    comp = _clip(comp, limit)
+
     if ven and comp:
-        return f"{ven} / {comp}" if ven.lower() != comp.lower() else comp
+        low_v, low_c = ven.lower(), comp.lower()
+        if low_c == low_v:
+            # 同名的两家写法不同，留好看的那个（Dolibarr 优于 dolibarr）
+            return comp if any(ch.isupper() for ch in comp) else ven
+        if low_c.startswith(low_v + " "):
+            comp = comp[len(ven):].lstrip()      # 产品名自带厂商前缀，别重复
+        return f"{ven} / {comp}"
     if comp or ven:
         return comp or ven
     title = (v.get("title") or "").strip()
     if title:
-        return title[:limit] + ("…" if len(title) > limit else "")
+        return _clip(title, limit)
     return ""
 
 
