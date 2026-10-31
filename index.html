@@ -1,0 +1,981 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AIRadix · Vul Watch · 漏洞情报全景</title>
+<meta name="description" content="多源漏洞情报聚合，按自有组件精确匹配，分级推送可操作的漏洞处置信息。">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='8' fill='%235b5bd6'/><path d='M16 6l8 5v10l-8 5-8-5V11z' fill='none' stroke='white' stroke-width='1.6'/><circle cx='16' cy='16' r='2.6' fill='white'/></svg>">
+<style>
+  :root {
+    --bg: #fafafb;
+    --panel: #ffffff;
+    --panel-2: #f6f6f9;
+    --line: #e9e9ef;
+    --line-strong: #dcdce5;
+    --text: #14141a;
+    --text-2: #5c5c70;
+    --text-3: #8e8ea3;
+    --brand: #5b5bd6;
+    --brand-2: #7a5bd6;
+    --brand-soft: #eeeefc;
+    --green: #0f9d58;
+    --green-soft: #e8f8ef;
+    --amber: #c2760a;
+    --amber-soft: #fdf4e3;
+    --red: #d63b3b;
+    --red-soft: #fdeceb;
+    --radius: 10px;
+    --radius-sm: 7px;
+    --shadow-sm: 0 1px 2px rgba(20,20,26,.04);
+    --shadow-md: 0 4px 16px rgba(20,20,26,.07);
+    --shadow-lg: 0 18px 48px rgba(20,20,26,.14);
+    --mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
+    --sans: -apple-system, BlinkMacSystemFont, "SF Pro SC", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+    /* 分级语义色 */
+    --lv-p0: #e5484d; --lv-p0-tx: #c2222b; --lv-p0-bg: #fdeceb;
+    --lv-p1: #f97316; --lv-p1-tx: #b8500a; --lv-p1-bg: #fff4e8;
+    --lv-p2: #f2b200; --lv-p2-tx: #8a6400; --lv-p2-bg: #fdf6e2;
+    --lv-low: #2f9e5f; --lv-low-tx: #1f7444; --lv-low-bg: #e8f8ef;
+    --lv-info: #a5a5b4; --lv-info-tx: #6e6e7e; --lv-info-bg: #f2f2f6;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html { scroll-behavior: smooth; }
+  body {
+    font-family: var(--sans);
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.55;
+    -webkit-font-smoothing: antialiased;
+    font-size: 14px;
+  }
+  a { color: inherit; text-decoration: none; }
+  button { font-family: inherit; cursor: pointer; }
+  .mono { font-family: var(--mono); }
+
+  /* ===== 顶栏 ===== */
+  .topbar {
+    position: sticky; top: 0; z-index: 50;
+    height: 54px; padding: 0 20px;
+    background: rgba(250,250,251,.86);
+    backdrop-filter: blur(12px);
+    border-bottom: 1px solid var(--line);
+    display: flex; align-items: center; gap: 20px;
+  }
+  .brand { display: flex; align-items: center; gap: 10px; flex: 0 0 auto; }
+  .brand-mark {
+    width: 28px; height: 28px; border-radius: 8px;
+    background: linear-gradient(140deg, var(--brand), var(--brand-2));
+    display: flex; align-items: center; justify-content: center;
+    box-shadow: 0 2px 8px rgba(91,91,214,.28);
+  }
+  .brand-mark svg { width: 16px; height: 16px; }
+  .brand-text { display: flex; flex-direction: column; line-height: 1.15; }
+  .brand-title { font-size: 15px; font-weight: 700; letter-spacing: -.2px; }
+  .brand-sub { font-size: 10.5px; color: var(--text-3); letter-spacing: .2px; }
+
+  .page-nav { display: flex; gap: 4px; }
+  .page-nav a {
+    padding: 5px 12px; border-radius: 7px; font-size: 13.5px;
+    color: var(--text-2); transition: all .14s;
+  }
+  .page-nav a:hover { color: var(--text); background: var(--panel-2); }
+  .page-nav a.on { color: var(--brand); background: var(--brand-soft); font-weight: 600; }
+
+  .topbar-spacer { flex: 1 1 auto; }
+  .topbar-meta { display: flex; align-items: center; gap: 10px; }
+  .dot-live {
+    width: 7px; height: 7px; border-radius: 50%; background: var(--green);
+    display: inline-block; margin-right: 6px;
+    animation: pulse 1.8s infinite;
+  }
+  @keyframes pulse {
+    0% { box-shadow: 0 0 0 0 rgba(15,157,88,.5); }
+    70% { box-shadow: 0 0 0 6px rgba(15,157,88,0); }
+    100% { box-shadow: 0 0 0 0 rgba(15,157,88,0); }
+  }
+  #updatedAt { font-size: 12.5px; color: var(--text-3); }
+  .btn-ghost {
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 6px 12px; border-radius: 7px; font-size: 12.5px;
+    color: var(--text-2); background: var(--panel);
+    border: 1px solid var(--line); transition: all .14s;
+  }
+  .btn-ghost:hover { border-color: var(--line-strong); color: var(--text); }
+  .btn-ghost svg { width: 14px; height: 14px; }
+
+  .shell { max-width: 1180px; margin: 0 auto; padding: 0 24px; }
+
+  /* ===== Hero ===== */
+  .hero { padding: 40px 0 24px; }
+  .hero-eyebrow {
+    display: inline-flex; align-items: center; gap: 7px;
+    font-size: 12px; font-weight: 600; letter-spacing: .4px;
+    color: var(--brand); background: var(--brand-soft);
+    padding: 4px 12px; border-radius: 999px; margin-bottom: 16px;
+  }
+  .hero-eyebrow svg { width: 11px; height: 11px; }
+  .hero h1 { font-size: 26px; font-weight: 800; letter-spacing: -.5px; }
+  .hero p { margin-top: 10px; color: var(--text-2); font-size: 15px; max-width: 720px; }
+
+  .stats {
+    display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px;
+    margin-top: 24px;
+  }
+  .stat {
+    background: var(--panel); border: 1px solid var(--line);
+    border-radius: var(--radius); padding: 18px 20px;
+    box-shadow: var(--shadow-sm); transition: box-shadow .15s, transform .15s;
+  }
+  .stat:hover { box-shadow: var(--shadow-md); transform: translateY(-1px); }
+  .stat-label { font-size: 12.5px; color: var(--text-3); }
+  .stat-value {
+    font-size: 30px; font-weight: 800; line-height: 1.15; margin-top: 6px;
+    font-variant-numeric: tabular-nums; letter-spacing: -.5px;
+  }
+  .stat-foot { font-size: 11.5px; color: var(--text-3); margin-top: 4px; }
+  .stat.accent-green .stat-value { color: var(--green); }
+  .stat.accent-amber .stat-value { color: var(--amber); }
+  .stat.accent-red .stat-value { color: var(--red); }
+
+  /* ===== 工具条 ===== */
+  .toolbar {
+    background: var(--panel); border: 1px solid var(--line);
+    border-radius: var(--radius); padding: 14px 16px;
+    margin: 26px 0 14px; box-shadow: var(--shadow-sm);
+  }
+  .toolbar-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  .toolbar-row + .toolbar-row { margin-top: 12px; }
+  .search-wrap {
+    position: relative; display: flex; align-items: center;
+    flex: 0 0 auto; min-width: 240px;
+  }
+  .search-wrap svg {
+    position: absolute; left: 12px; width: 15px; height: 15px;
+    color: var(--text-3); pointer-events: none;
+  }
+  .search-wrap input {
+    width: 100%; padding: 8px 38px 8px 34px;
+    border: 1px solid var(--line); border-radius: var(--radius-sm);
+    font-size: 13.5px; font-family: inherit; background: var(--panel);
+    color: var(--text); outline: none; transition: border-color .14s, box-shadow .14s;
+  }
+  .search-wrap input:focus { border-color: var(--brand); box-shadow: 0 0 0 3px var(--brand-soft); }
+  .kbd-hint {
+    position: absolute; right: 10px; font-size: 11px; color: var(--text-3);
+    border: 1px solid var(--line); border-radius: 4px; padding: 1px 5px;
+  }
+  .chips { display: flex; gap: 6px; flex-wrap: wrap; }
+  .chip {
+    padding: 5px 12px; border-radius: 999px; font-size: 12.5px;
+    border: 1px solid var(--line); color: var(--text-2); background: var(--panel);
+    transition: all .13s; user-select: none;
+  }
+  .chip:hover { border-color: var(--line-strong); }
+  .chip.on { background: var(--brand-soft); border-color: var(--brand); color: var(--brand); font-weight: 600; }
+  .chip-sep { width: 1px; height: 20px; background: var(--line); }
+  .spacer { flex: 1 1 auto; }
+  .select {
+    padding: 7px 30px 7px 12px; border: 1px solid var(--line);
+    border-radius: var(--radius-sm); font-size: 13px; font-family: inherit;
+    color: var(--text); background: var(--panel);
+    appearance: none; outline: none; cursor: pointer;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%238e8ea3' stroke-width='2' stroke-linecap='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
+    background-repeat: no-repeat; background-position: right 10px center;
+    transition: border-color .14s;
+  }
+  .select:hover { border-color: var(--line-strong); }
+  .select:focus { border-color: var(--brand); }
+  .seg { display: flex; border: 1px solid var(--line); border-radius: var(--radius-sm); overflow: hidden; }
+  .seg button {
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 7px 13px; font-size: 12.5px; color: var(--text-2);
+    background: var(--panel); border: none; transition: all .14s;
+  }
+  .seg button + button { border-left: 1px solid var(--line); }
+  .seg button.on { background: var(--brand-soft); color: var(--brand); font-weight: 600; }
+  .seg button svg { width: 14px; height: 14px; }
+
+  .active-filters { margin-top: 12px; min-height: 0; }
+
+  /* ===== 结果栏 ===== */
+  .result-bar { display: flex; align-items: center; padding: 4px 2px; margin-bottom: 10px; }
+  .result-count { font-size: 12.5px; color: var(--text-3); }
+
+  /* ===== 表格 ===== */
+  .table-wrap {
+    background: var(--panel); border: 1px solid var(--line);
+    border-radius: var(--radius); box-shadow: var(--shadow-sm);
+    overflow: hidden; margin-bottom: 20px;
+  }
+  .table-scroll { overflow-x: auto; }
+
+  /* ===== 分页 ===== */
+  .pager {
+    display: flex; align-items: center; justify-content: center; gap: 6px;
+    padding: 4px 0 22px; flex-wrap: wrap;
+  }
+  .pager button {
+    min-width: 34px; height: 32px; padding: 0 10px;
+    border: 1px solid var(--line); background: var(--panel); color: var(--text-2);
+    border-radius: 8px; font-size: 13px; cursor: pointer; font-family: inherit;
+    transition: all .14s;
+  }
+  .pager button:hover:not(:disabled) { border-color: var(--brand); color: var(--brand); }
+  .pager button.on { background: var(--brand); border-color: var(--brand); color: #fff; font-weight: 600; }
+  .pager button:disabled { opacity: .38; cursor: not-allowed; }
+  .pager .dots { color: var(--text-3); padding: 0 2px; }
+  .pager .info { color: var(--text-3); font-size: 12.5px; margin-left: 10px; }
+  /* 结果栏里的紧凑翻页：50 行表格翻到页底太远，顶部也得有个"下一页" */
+  .pager-mini { display: inline-flex; align-items: center; gap: 4px; }
+  .pager-mini button {
+    width: 26px; height: 24px; border: 1px solid var(--line); background: var(--panel);
+    color: var(--text-2); border-radius: 6px; cursor: pointer; font-size: 13px;
+    line-height: 1; font-family: inherit; transition: all .14s;
+  }
+  .pager-mini button:hover:not(:disabled) { border-color: var(--brand); color: var(--brand); }
+  .pager-mini button:disabled { opacity: .35; cursor: not-allowed; }
+  .pager-mini .info { color: var(--text-3); font-size: 12px; }
+  table.models { width: 100%; border-collapse: collapse; font-size: 13.5px; }
+  table.models thead th {
+    text-align: left; padding: 12px 12px; font-size: 12px; font-weight: 600;
+    color: var(--text-3); border-bottom: 1px solid var(--line);
+    white-space: nowrap; background: var(--panel-2);
+  }
+  table.models thead th.sortable { cursor: pointer; transition: color .14s; }
+  table.models thead th.sortable:hover { color: var(--text); }
+  table.models thead th.sorted { color: var(--brand); }
+  table.models tbody td { padding: 13px 12px; border-bottom: 1px solid var(--line); vertical-align: middle; }
+  table.models tbody tr:last-child td { border-bottom: 0; }
+  table.models tbody tr:hover { background: #f8f8fc; }
+
+  .lv-tag {
+    display: inline-flex; align-items: center; justify-content: center;
+    min-width: 34px; padding: 2px 9px; border-radius: 6px;
+    font-size: 11.5px; font-weight: 700; letter-spacing: .3px;
+  }
+  .lv-tag.P0 { background: var(--lv-p0-bg); color: var(--lv-p0-tx); }
+  .lv-tag.P1 { background: var(--lv-p1-bg); color: var(--lv-p1-tx); }
+  .lv-tag.P2 { background: var(--lv-p2-bg); color: var(--lv-p2-tx); }
+
+  .cve-id { font-family: var(--mono); font-weight: 600; color: var(--brand); white-space: nowrap; }
+  .comp-name { color: var(--text); font-weight: 600; }
+  .model-title { color: var(--text-2); font-size: 13px; max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .cvss-num { font-family: var(--mono); font-weight: 600; }
+  .tag {
+    display: inline-flex; align-items: center; gap: 3px;
+    font-size: 11px; padding: 2px 8px; border-radius: 5px; white-space: nowrap;
+  }
+  .tag.kev { background: var(--lv-p0-bg); color: var(--lv-p0-tx); font-weight: 600; }
+  .tag.epss { background: var(--brand-soft); color: var(--brand); }
+  .tag.match { background: var(--green-soft); color: var(--green); font-weight: 600; }
+  .tag.ransom { background: var(--lv-p0-bg); color: var(--lv-p0-tx); }
+  .tag.none { background: var(--panel-2); color: var(--text-3); }
+
+  .hide-xs { } .hide-sm { } .hide-md { }
+  @media (max-width: 960px) { .hide-md { display: none; } }
+  @media (max-width: 720px) { .hide-sm { display: none; } }
+  @media (max-width: 560px) { .hide-xs { display: none; } }
+
+  /* ===== 卡片视图 ===== */
+  .cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 14px; margin-bottom: 20px; }
+  .card {
+    background: var(--panel); border: 1px solid var(--line);
+    border-radius: var(--radius); padding: 18px 20px;
+    box-shadow: var(--shadow-sm); transition: box-shadow .15s, transform .15s;
+    cursor: pointer;
+  }
+  .card:hover { box-shadow: var(--shadow-md); transform: translateY(-2px); }
+  .card-head { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
+  .card-head .spacer { flex: 1 1 auto; }
+  .card-title { font-size: 14.5px; font-weight: 700; line-height: 1.4; }
+  .card-title .cve-id { font-size: 14px; }
+  .card-title .comp-name { margin-left: 4px; }
+  .card-meta { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+  .card-kv { margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--line); font-size: 12.5px; }
+  .card-kv .k { color: var(--text-3); margin-right: 6px; }
+  .card-kv .v { color: var(--text-2); }
+
+  /* ===== 空态 ===== */
+  .empty { text-align: center; padding: 70px 20px; color: var(--text-3); }
+  .empty .big { font-size: 40px; margin-bottom: 14px; }
+
+  /* ===== 趋势 ===== */
+  .chart-box {
+    background: var(--panel); border: 1px solid var(--line);
+    border-radius: var(--radius); padding: 24px; box-shadow: var(--shadow-sm);
+    margin-bottom: 24px;
+  }
+  .chart-title { font-size: 15px; font-weight: 700; margin-bottom: 20px; }
+  .bars { display: flex; align-items: flex-end; gap: 14px; height: 170px; }
+  .bar-col { flex: 1; display: flex; flex-direction: column; align-items: center; gap: 6px; height: 100%; justify-content: flex-end; }
+  .bar-stack { display: flex; flex-direction: column-reverse; gap: 2px; width: 100%; align-items: center; }
+  .bar-seg { width: 100%; border-radius: 3px 3px 0 0; min-height: 2px; }
+  .bar-seg.P0 { background: var(--lv-p0); }
+  .bar-seg.P1 { background: var(--lv-p1); }
+  .bar-seg.P2 { background: var(--lv-p2); }
+  .bar-label { font-size: 11px; color: var(--text-3); white-space: nowrap; }
+  .legend { display: flex; gap: 16px; margin-bottom: 14px; font-size: 12px; color: var(--text-2); }
+  .legend i { display: inline-block; width: 9px; height: 9px; border-radius: 2px; margin-right: 5px; }
+
+  .warn-bar {
+    display: flex; align-items: flex-start; gap: 8px;
+    background: var(--amber-soft); border: 1px solid #f0dcb0;
+    color: var(--amber); border-radius: var(--radius-sm); padding: 11px 14px;
+    font-size: 13px; margin-bottom: 16px;
+  }
+  .sources-bar {
+    display: flex; flex-wrap: wrap; gap: 6px; align-items: center;
+    margin-bottom: 16px; font-size: 12.5px; color: var(--text-3);
+  }
+  .src-chip {
+    padding: 3px 9px; border-radius: 6px; font-size: 11.5px;
+    background: var(--brand-soft); color: var(--brand);
+    border: 1px solid #ddddf5;
+  }
+
+  footer {
+    border-top: 1px solid var(--line); padding: 32px 0 48px;
+    color: var(--text-3); font-size: 12.5px; text-align: center;
+  }
+  footer .accent { color: var(--brand); }
+
+  @media (max-width: 720px) {
+    .stats { grid-template-columns: repeat(2, 1fr); }
+    .page-nav { display: none; }
+    .hero { padding: 28px 0 20px; }
+    .hero h1 { font-size: 22px; }
+  }
+</style>
+</head>
+<body>
+
+<!-- ============ 顶栏 ============ -->
+<header class="topbar">
+  <div class="brand">
+    <div class="brand-mark">
+      <svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linejoin="round">
+        <path d="M12 3l8 5v8l-8 5-8-5V8z" stroke-linejoin="round"/>
+        <circle cx="12" cy="12" r="2.4" fill="#fff" stroke="none"/>
+      </svg>
+    </div>
+    <div class="brand-text">
+      <span class="brand-title">AIRadix · Vul Watch</span>
+      <span class="brand-sub">漏洞情报全景</span>
+    </div>
+  </div>
+
+  <nav class="page-nav">
+    <a href="#overview" class="on">总览</a>
+    <a href="#latest">漏洞清单</a>
+    <a href="#trend">趋势</a>
+  </nav>
+
+  <div class="topbar-spacer"></div>
+
+  <div class="topbar-meta">
+    <span id="updatedAt"><span class="dot-live"></span>加载中…</span>
+    <button class="btn-ghost" id="sourceLink" title="查看数据源">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><path d="M15 3h6v6"/><path d="M10 14 21 3"/></svg>
+      数据源
+    </button>
+    <button class="btn-ghost" id="reloadBtn" title="重新拉取本地数据">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M21 12a9 9 0 1 1-2.6-6.4"/><path d="M21 3v6h-6"/></svg>
+      刷新
+    </button>
+  </div>
+</header>
+
+<div class="shell">
+
+  <!-- ============ Hero ============ -->
+  <section class="hero" id="overview">
+    <div class="hero-eyebrow">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><path d="M3 12h4l3 8 4-16 3 8h4"/></svg>
+      Vulnerability Intelligence
+    </div>
+    <h1>漏洞情报全景看板</h1>
+    <p>多源聚合 NVD / OSV / CISA KEV / EPSS / GitHub Advisory / Packagist，按自有组件精确匹配，分级推送可操作的处置信息。数据每日自动同步。</p>
+
+    <div class="stats" id="stats"></div>
+    <div id="degraded-box"></div>
+  </section>
+
+  <!-- ============ 工具条 ============ -->
+  <div class="toolbar" id="toolbar">
+    <div class="toolbar-row">
+      <div class="search-wrap">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
+        <input id="search" type="search" placeholder="搜索 CVE、组件、厂商或描述…" autocomplete="off" spellcheck="false">
+        <span class="kbd-hint">/</span>
+      </div>
+
+      <div class="chips" id="levelChips"></div>
+
+      <div class="spacer"></div>
+
+      <select class="select" id="sortSelect" title="排序方式">
+        <option value="newest" selected>发布日期最新</option>
+        <option value="level">按分级（P0→P2）</option>
+        <option value="cvss-desc">CVSS 从高到低</option>
+        <option value="epss-desc">EPSS 从高到低</option>
+        <option value="name">CVE A→Z</option>
+      </select>
+
+      <div class="seg" id="viewSeg">
+        <button data-view="table" class="on" title="表格视图">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 10h18M9 10v10"/></svg>
+          表格
+        </button>
+        <button data-view="card" title="卡片视图">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg>
+          卡片
+        </button>
+      </div>
+    </div>
+
+    <div class="toolbar-row">
+      <div class="chips" id="rangeChips"></div>
+      <div class="chip-sep"></div>
+      <div class="chips" id="flagChips"></div>
+      <div class="chip-sep"></div>
+      <div class="chips" id="compChips"></div>
+    </div>
+  </div>
+
+  <!-- ============ 结果栏 ============ -->
+  <div class="result-bar">
+    <span class="result-count" id="resultCount">加载中…</span>
+    <span class="spacer"></span>
+    <span id="pagerTop" class="pager-mini"></span>
+    <span id="rangeLabel" style="font-size:12px;color:var(--text-3)"></span>
+  </div>
+
+  <!-- ============ 内容 ============ -->
+  <div id="latest">
+    <div class="table-wrap" id="tableWrap">
+      <div class="table-scroll">
+        <table class="models">
+          <thead>
+            <tr>
+              <th>级别</th>
+              <th>CVE</th>
+              <th class="sortable sorted" data-sort="newest">发布日期</th>
+              <th>组件</th>
+              <th class="hide-xs">厂商</th>
+              <th class="hide-sm">描述</th>
+              <th class="sortable" data-sort="cvss-desc">CVSS</th>
+              <th class="sortable" data-sort="epss-desc">EPSS</th>
+              <th class="hide-md">标签</th>
+              <th class="hide-md">影响</th>
+            </tr>
+          </thead>
+          <tbody id="tbody"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="cards" id="cardView" style="display:none"></div>
+
+    <div id="emptyState"></div>
+
+    <div class="pager" id="pager"></div>
+  </div>
+
+  <!-- ============ 趋势 ============ -->
+  <section id="trend" class="chart-box">
+    <div class="chart-title" id="trendTitle">命中趋势</div>
+    <div class="legend">
+      <span><i style="background:var(--lv-p0)"></i>P0 立即处置</span>
+      <span><i style="background:var(--lv-p1)"></i>P1 本周处置</span>
+      <span><i style="background:var(--lv-p2)"></i>P2 观察列表</span>
+    </div>
+    <div class="bars" id="bars"></div>
+  </section>
+</div>
+
+<footer>
+  <div class="shell">
+    由 <span class="accent">vuln-watch</span> 自动采集生成 ·
+    数据源：NVD · OSV · CISA KEV · FIRST EPSS · GitHub Advisory · Packagist
+  </div>
+</footer>
+
+<script>
+const LEVEL_ORDER = { P0: 0, P1: 1, P2: 2 };
+const RANGES = [[7, "近 7 天"], [30, "近 30 天"], [90, "近 90 天"], [365, "近一年"], [0, "全部"]];
+const $ = (s) => document.querySelector(s);
+
+let DATA = { entries: [], daily: [], stats: {}, sources: [], degraded: [], range: {}, last_run: null };
+let state = { range: 0, level: "all", flags: new Set(), comps: new Set(), search: "", sort: "newest", view: "table", page: 1, rangeUser: false };
+
+function esc(s) {
+  return (s || "").replace(/[&<>"']/g, c => ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;" }[c]));
+}
+function ymd(d) {
+  return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;
+}
+function cutoff(days) {
+  const d = new Date(); d.setDate(d.getDate() - days); return ymd(d);
+}
+function fmtDate(iso) {
+  if (!iso) return "";
+  const p = String(iso).slice(0, 10).split("-");
+  return p.length === 3 ? `${p[1]}-${p[2]}` : iso;
+}
+function cvssText(e) {
+  return `CVSS${e.cvss_exact ? "" : "≈"}${(e.cvss || 0).toFixed(1)}`;
+}
+
+/* ---------- 筛选控件 ---------- */
+function renderRangeChips() {
+  $("#rangeChips").innerHTML = RANGES.map(([v, t]) =>
+    `<span class="chip ${state.range === v ? "on" : ""}" data-range="${v}">${t}</span>`).join("");
+}
+function renderLevelChips() {
+  const opts = [["all", "全部分级"], ["P0", "P0 立即处置"], ["P1", "P1 本周处置"], ["P2", "P2 观察"]];
+  $("#levelChips").innerHTML = opts.map(([v, t]) =>
+    `<span class="chip ${state.level === v ? "on" : ""}" data-level="${v}">${t}</span>`).join("");
+}
+function renderFlagChips() {
+  const opts = [["kev", "在野利用 KEV"], ["match", "命中自有组件"], ["epss", "高利用概率"]];
+  $("#flagChips").innerHTML = opts.map(([v, t]) =>
+    `<span class="chip ${state.flags.has(v) ? "on" : ""}" data-flag="${v}">${t}</span>`).join("");
+}
+function renderCompChips() {
+  const counts = new Map();
+  for (const e of DATA.entries) {
+    if (!e.component) continue;
+    counts.set(e.component, (counts.get(e.component) || 0) + 1);
+  }
+  const comps = [...counts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 14);
+  $("#compChips").innerHTML = comps.map(([c, n]) =>
+    `<span class="chip ${state.comps.has(c) ? "on" : ""}" data-comp="${esc(c)}">${esc(c)} ${n}</span>`).join("");
+}
+
+/* ---------- 数据筛选 ---------- */
+function inRange(e) {
+  if (state.range === 0) return true;
+  const p = (e.published || "").slice(0, 10);
+  return !p || p >= cutoff(state.range);
+}
+
+function filtered() {
+  let list = DATA.entries.filter(inRange);
+  if (state.level !== "all") list = list.filter(e => e.level === state.level);
+  if (state.flags.has("kev")) list = list.filter(e => e.kev);
+  if (state.flags.has("match")) list = list.filter(e => e.exact_match);
+  if (state.flags.has("epss")) list = list.filter(e => (e.epss || 0) >= 0.5);
+  if (state.comps.size) list = list.filter(e => state.comps.has(e.component));
+  if (state.search) {
+    const q = state.search.toLowerCase();
+    list = list.filter(e =>
+      (e.cve || "").toLowerCase().includes(q) ||
+      (e.component || "").toLowerCase().includes(q) ||
+      (e.vendor || "").toLowerCase().includes(q) ||
+      (e.title || "").toLowerCase().includes(q) ||
+      (e.impact || "").toLowerCase().includes(q));
+  }
+  const s = state.sort;
+  list.sort((a, b) => {
+    if (s === "level") return (LEVEL_ORDER[a.level] ?? 9) - (LEVEL_ORDER[b.level] ?? 9) || (b.cvss || 0) - (a.cvss || 0);
+    if (s === "cvss-desc") return (b.cvss || 0) - (a.cvss || 0);
+    if (s === "epss-desc") return (b.epss || 0) - (a.epss || 0);
+    if (s === "newest") return (b.published || "").localeCompare(a.published || "") || (b.cvss || 0) - (a.cvss || 0);
+    if (s === "name") return (a.cve || "").localeCompare(b.cve || "");
+    return 0;
+  });
+  return list;
+}
+
+function flagTags(e) {
+  const t = [];
+  if (e.kev) t.push(`<span class="tag kev">在野利用</span>`);
+  if (e.ransomware === "Known") t.push(`<span class="tag ransom">勒索</span>`);
+  if (e.exact_match) t.push(`<span class="tag match">命中组件</span>`);
+  if (e.epss > 0) t.push(`<span class="tag epss">EPSS ${(e.epss * 100).toFixed(0)}%</span>`);
+  return t.join("") || `<span class="tag none">—</span>`;
+}
+
+/* 组件的悬浮提示：极窄屏（≤560px）会把厂商列隐藏掉，这里把「厂商 / 产品」补全 */
+function compTitle(e) {
+  const c = e.component || "", v = e.vendor || "";
+  if (c && v && v.toLowerCase() !== c.toLowerCase()) return `${v} / ${c}`;
+  return v || c;
+}
+
+/* ---------- 渲染 ---------- */
+function renderTable(list) {
+  if (!list.length) { $("#tbody").innerHTML = ""; return; }
+  $("#tbody").innerHTML = list.map(e => `
+    <tr onclick="window.open('${esc(e.url)}','_blank')" style="cursor:pointer">
+      <td><span class="lv-tag ${e.level}">${e.level}</span></td>
+      <td class="cve-id">${esc(e.cve)}</td>
+      <td style="color:var(--text-2);white-space:nowrap">${fmtDate(e.published)}</td>
+      <td class="comp-name" style="max-width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${compTitle(e)}">${esc(e.component || "—")}</td>
+      <td class="hide-xs" style="max-width:110px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text-2)" title="${esc(e.vendor || "")}">${esc(e.vendor || "—")}</td>
+      <td class="model-title hide-sm" title="${esc(e.title || "")}">${esc((e.title || "").slice(0, 56))}</td>
+      <td class="cvss-num">${cvssText(e)}</td>
+      <td class="cvss-num">${e.epss > 0 ? (e.epss * 100).toFixed(0) + "%" : "—"}</td>
+      <td class="hide-md">${flagTags(e)}</td>
+      <td class="hide-md" style="color:var(--text-2);max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(e.impact || "")}">${esc((e.impact || "").slice(0, 36))}</td>
+    </tr>`).join("");
+}
+
+function renderCards(list) {
+  if (!list.length) { $("#cardView").innerHTML = ""; return; }
+  $("#cardView").innerHTML = list.map(e => {
+    const rows = [];
+    if (e.impact) rows.push(`<div class="card-kv"><span class="k">影响</span><span class="v">${esc(e.impact)}</span></div>`);
+    if (e.attack_cond) rows.push(`<div class="card-kv"><span class="k">条件</span><span class="v">${esc(e.attack_cond)}</span></div>`);
+    if (e.affected_range) rows.push(`<div class="card-kv"><span class="k">范围</span><span class="v">${esc(e.affected_range)}</span></div>`);
+    return `
+      <div class="card" onclick="window.open('${esc(e.url)}','_blank')">
+        <div class="card-head">
+          <span class="lv-tag ${e.level}">${e.level}</span>
+          <span class="cvss-num" style="color:var(--text-2)">${cvssText(e)}</span>
+          <span class="spacer"></span>
+          <span style="font-size:11px;color:var(--text-3)">${fmtDate(e.published)}</span>
+        </div>
+        <div class="card-title"><span class="cve-id">${esc(e.cve)}</span><span class="comp-name">${e.component ? " · " + esc(e.component) : ""}${e.vendor && e.vendor !== e.component ? ` <span style="color:var(--text-3);font-weight:400">(${esc(e.vendor)})</span>` : ""}</span></div>
+        <div style="color:var(--text-2);font-size:12.5px;margin-top:4px">${esc((e.title || "").slice(0, 68))}</div>
+        <div class="card-meta">${flagTags(e)}</div>
+        ${rows.join("")}
+      </div>`;
+  }).join("");
+}
+
+// 每页条数。20 条一屏：手机上一屏能看完，翻页按钮不用滚很远，
+// 每次 render 只重建 20 行 DOM，弱机/弱网下切换筛选也跟手。
+const PAGE_SIZE = 20;
+
+function pageCount(total) { return Math.max(1, Math.ceil(total / PAGE_SIZE)); }
+
+function renderPager(total) {
+  const pages = pageCount(total);
+  const cur = Math.min(Math.max(1, state.page), pages);
+  if (!total) { $("#pager").innerHTML = ""; $("#pagerTop").innerHTML = ""; return; }
+
+  // 顶部紧凑翻页：表格 50 行，翻到页底太远
+  $("#pagerTop").innerHTML = pages > 1
+    ? `<button data-page="${cur - 1}" ${cur === 1 ? "disabled" : ""} title="上一页">‹</button>
+       <span class="info">${cur}/${pages}</span>
+       <button data-page="${cur + 1}" ${cur === pages ? "disabled" : ""} title="下一页">›</button>`
+    : `<span class="info">${total} 条</span>`;
+
+  if (pages <= 1) { $("#pager").innerHTML = `<span class="info">共 ${total} 条</span>`; return; }
+
+  // 底部完整页码：首页 + 当前页前后各 2 页 + 末页，中间用省略号收起来
+  const nums = new Set([1, pages]);
+  for (let n = cur - 2; n <= cur + 2; n++) if (n > 1 && n < pages) nums.add(n);
+  const seq = [...nums].sort((a, b) => a - b);
+
+  let html = `<button data-page="${cur - 1}" ${cur === 1 ? "disabled" : ""}>上一页</button>`;
+  let prev = 0;
+  for (const n of seq) {
+    if (prev && n - prev > 1) html += `<span class="dots">…</span>`;
+    html += `<button data-page="${n}" class="${n === cur ? "on" : ""}">${n}</button>`;
+    prev = n;
+  }
+  html += `<button data-page="${cur + 1}" ${cur === pages ? "disabled" : ""}>下一页</button>`;
+  html += `<span class="info">第 ${cur}/${pages} 页 · 共 ${total} 条</span>`;
+  $("#pager").innerHTML = html;
+}
+
+function syncSortUI() {
+  document.querySelectorAll("table.models thead th.sortable").forEach(th => {
+    th.classList.toggle("sorted", th.dataset.sort === state.sort);
+  });
+  const sel = $("#sortSelect");
+  if (sel && sel.value !== state.sort) sel.value = state.sort;
+}
+
+function render() {
+  const all = filtered();
+  const pages = pageCount(all.length);
+  if (state.page > pages) state.page = pages;   // 筛选变窄后页码越界，回落到最后一页
+  const start = (state.page - 1) * PAGE_SIZE;
+  const list = all.slice(start, start + PAGE_SIZE);
+
+  $("#resultCount").textContent = all.length
+    ? `筛出 ${all.length} 条 / 全库 ${DATA.entries.length} 条 · 第 ${start + 1}-${start + list.length} 条`
+    : `筛出 0 条 / 全库 ${DATA.entries.length} 条`;
+  const empty = all.length === 0;
+  $("#emptyState").innerHTML = empty
+    ? `<div class="empty"><div class="big">🛡️</div>没有符合筛选条件的漏洞</div>` : "";
+  if (state.view === "table") {
+    $("#tableWrap").style.display = empty ? "none" : "";
+    $("#cardView").style.display = "none";
+    renderTable(list);
+  } else {
+    $("#tableWrap").style.display = "none";
+    $("#cardView").style.display = empty ? "none" : "grid";
+    renderCards(list);
+  }
+  renderPager(all.length);
+  renderStats(all);
+  renderTrend();
+  syncSortUI();
+}
+
+function renderStats(list) {
+  const src = list || filtered();
+  const p0 = src.filter(e => e.level === "P0").length;
+  const p1 = src.filter(e => e.level === "P1").length;
+  const kev = src.filter(e => e.kev).length;
+  const exact = src.filter(e => e.exact_match).length;
+  // 只拿到轻量包时，卡片上的数字是"最近 N 条"的，不是全库：
+  // 明确标出总量，别让人以为漏洞从 8090 掉到 600 了
+  const total = DATA.total_entries || DATA.entries.length;
+  const liteOnly = loadState.lite && !loadState.full;
+  const footRange = DATA.range && DATA.range.from
+    ? `${DATA.range.from} → ${DATA.range.to}` : "等待采集";
+  $("#stats").innerHTML = `
+    <div class="stat">
+      <div class="stat-label">收录漏洞</div>
+      <div class="stat-value">${liteOnly ? total : src.length}</div>
+      <div class="stat-foot">${liteOnly ? `全库 ${total} 条 · 已加载最近 ${src.length} 条` : footRange}</div>
+    </div>
+    <div class="stat accent-red">
+      <div class="stat-label">立即处置 P0</div>
+      <div class="stat-value">${p0}</div>
+      <div class="stat-foot">在野利用 · 命中自有组件</div>
+    </div>
+    <div class="stat accent-amber">
+      <div class="stat-label">本周处置 P1</div>
+      <div class="stat-value">${p1}</div>
+      <div class="stat-foot">高危且需排期</div>
+    </div>
+    <div class="stat accent-green">
+      <div class="stat-label">在野利用 KEV</div>
+      <div class="stat-value">${kev}</div>
+      <div class="stat-foot">命中自有组件 ${exact} 条</div>
+    </div>`;
+
+  const deg = DATA.degraded || [];
+  const degHtml = deg.length
+    ? `<div class="warn-bar">⚠️ ${deg.map(esc).join("；")}。结果可能不完整，请检查数据源。</div>` : "";
+  // 轻量态 / 全量失败的提示条，带重试入口 —— 别让人对着一个半截页面干等
+  const liteHtml = liteOnly
+    ? `<div class="warn-bar">📦 已加载最近 ${src.length} 条${loadState.err ? `，全量拉取失败（${esc(errText(loadState.err))}）` : "，全量数据后台加载中…"}
+       <a href="javascript:void(0)" onclick="load()" style="margin-left:8px;text-decoration:underline">重试</a></div>` : "";
+  const srcChips = (DATA.sources || []).map(s => `<span class="src-chip">${esc(s)}</span>`).join("");
+  $("#degraded-box").innerHTML = liteHtml + degHtml +
+    (srcChips ? `<div class="sources-bar">数据源　${srcChips}</div>` : "");
+
+  const gen = DATA.generated_at ? new Date(DATA.generated_at) : null;
+  const mode = DATA.mode === "backfill" ? "历史回填" : "每日巡检";
+  $("#updatedAt").innerHTML = `<span class="dot-live"></span>` +
+    (gen ? `${ymd(gen).slice(5)} ${String(gen.getHours()).padStart(2,"0")}:${String(gen.getMinutes()).padStart(2,"0")} · ${mode}` : "等待数据");
+  $("#rangeLabel").textContent = DATA.last_run
+    ? `上次运行 ${DATA.last_run.date} · 命中 ${DATA.last_run.hit} 条` : "";
+}
+
+function renderTrend() {
+  // 一年按天画是 365 根柱子，没法看；跨度超过 70 天就按月聚合
+  const days = (DATA.daily || []).filter(d => state.range === 0 || d.date >= cutoff(state.range));
+  const spanDays = days.length;
+  const monthly = state.range === 0 || state.range > 70 || spanDays > 70;
+
+  let buckets;
+  if (monthly) {
+    const m = new Map();
+    for (const d of days) {
+      const k = d.date.slice(0, 7);
+      const cur = m.get(k) || { label: k.slice(2), hit: 0, p0: 0, p1: 0, p2: 0 };
+      cur.hit += d.hit; cur.p0 += d.p0; cur.p1 += d.p1; cur.p2 += d.p2;
+      m.set(k, cur);
+    }
+    buckets = [...m.values()];
+  } else {
+    buckets = days.map(d => ({ label: fmtDate(d.date), hit: d.hit, p0: d.p0, p1: d.p1, p2: d.p2 }));
+  }
+
+  $("#trendTitle").textContent = monthly
+    ? `按月命中趋势 · ${buckets.length} 个月`
+    : `按日命中趋势 · ${buckets.length} 天`;
+
+  if (!buckets.length) { $("#bars").innerHTML = `<div class="empty" style="padding:30px">暂无趋势数据</div>`; return; }
+  const maxTotal = Math.max(1, ...buckets.map(b => b.p0 + b.p1 + b.p2));
+  const maxH = 130;
+  $("#bars").innerHTML = buckets.map(b => {
+    const segs = [];
+    for (const [lv, n] of [["P0", b.p0], ["P1", b.p1], ["P2", b.p2]]) {
+      if (n > 0) segs.push(`<div class="bar-seg ${lv}" style="height:${Math.max(3, Math.round(n / maxTotal * maxH))}px" title="${lv} × ${n}"></div>`);
+    }
+    return `<div class="bar-col" title="${b.label} 共 ${b.hit} 条">
+      <div class="bar-stack">${segs.join("")}</div>
+      <div class="bar-label">${b.label}</div></div>`;
+  }).join("");
+}
+
+/* ---------- 加载 ---------- */
+// 两段式加载：先吃轻量的 data-lite.json（约 300 KB，最近 600 条），
+// 页面立刻有内容；再后台拉 4 MB 全量，成功后静默替换。
+// 全量在国内链路上经常几十秒甚至中途断，旧版直接 fetch("data.json") 会一直挂着，
+// 用户看到的就是空白或"暂无数据"。现在最坏情况也只是少了几千条历史。
+const LITE_URL = "data-lite.json";
+const FULL_URL = "data.json";
+
+// 加载状态：lite=当前显示的是轻量包，full=全量已到位，err=全量失败原因
+let loadState = { lite: false, full: false, err: null, painted: false };
+
+function normalize(raw) {
+  // 兼容早期"按天数组"格式
+  if (Array.isArray(raw)) {
+    const entries = [];
+    for (const day of raw) entries.push(...(day.entries || []));
+    const st = raw[raw.length - 1] || {};
+    return { entries, daily: [], stats: { total: entries.length }, sources: st.sources || [], degraded: st.degraded || [], range: {}, last_run: null };
+  }
+  return raw || { entries: [] };
+}
+
+const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+
+// 带超时 + 重试的 JSON 拉取。
+// 超时是关键：浏览器对卡住的响应不设上限，用户能等到怀疑人生；
+// AbortController 到点掐断，才有机会重试。
+async function fetchJSON(url, { retries = 2, timeoutMs = 30000 } = {}) {
+  let lastErr = null;
+  for (let i = 0; i <= retries; i++) {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+    try {
+      // 重试时加时间戳，绕开中间层可能缓存住的半截响应
+      const u = i === 0 ? url : `${url}?r=${Date.now()}`;
+      const resp = await fetch(u, { cache: "no-store", signal: ctrl.signal });
+      if (!resp.ok) throw new Error("HTTP " + resp.status);
+      return await resp.json();
+    } catch (e) {
+      lastErr = e;
+      if (i < retries) await sleep(700 * (i + 1));
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+  throw lastErr || new Error("未知错误");
+}
+
+function errText(e) {
+  if (!e) return "未知错误";
+  if (e.name === "AbortError") return "请求超时";
+  return e.message || String(e);
+}
+
+function applyData(raw, fromLite) {
+  DATA = normalize(raw);
+  if (!Array.isArray(DATA.entries)) DATA.entries = [];
+  if (fromLite) loadState.lite = true; else { loadState.full = true; loadState.lite = false; }
+}
+
+function paint() {
+  // 默认时间范围只在用户没手动选过时按数据重算：
+  // 轻量包只有最近几百条，会算成"近 30 天"；全量到位后要纠正成"近一年"
+  if (!state.rangeUser) {
+    const hasFull = DATA.entries.some(e => (e.published || "") < cutoff(90));
+    state.range = hasFull ? 365 : 30;
+  }
+  renderRangeChips();
+  renderLevelChips();
+  renderFlagChips();
+  renderCompChips();
+  render();
+  loadState.painted = true;
+}
+
+function showLoadError(e) {
+  $("#updatedAt").innerHTML = `<span class="dot-live"></span>加载失败`;
+  $("#resultCount").textContent = "数据加载失败";
+  $("#emptyState").innerHTML = `<div class="empty">
+    <div class="big">📡</div>数据加载失败：${esc(errText(e))}
+    <br><span style="font-size:13px">这不是"没采集到数据"，是浏览器没把 data.json 拉下来</span>
+    <br><button class="btn-ghost" onclick="load()" style="margin-top:14px">重新加载</button></div>`;
+}
+
+async function load() {
+  loadState = { lite: false, full: false, err: null, painted: false };
+
+  // 第一段：轻量包。失败不致命（老部署可能没有这个文件），继续走全量
+  try {
+    applyData(await fetchJSON(LITE_URL, { retries: 1, timeoutMs: 20000 }), true);
+    paint();
+  } catch (e) {
+    console.warn("轻量包不可用，改走全量：", errText(e));
+  }
+
+  // 第二段：全量。成功后静默替换，筛选/页码/排序状态都保留
+  try {
+    applyData(await fetchJSON(FULL_URL, { retries: 2, timeoutMs: 90000 }), false);
+    paint();
+  } catch (e) {
+    console.error("全量 data.json 加载失败：", e);
+    loadState.err = e;
+    if (loadState.painted) {
+      render();   // 让统计区把"仅精简数据"的提示画出来
+    } else {
+      showLoadError(e);
+    }
+  }
+}
+
+/* ---------- 事件 ---------- */
+$("#rangeChips").addEventListener("click", e => {
+  const c = e.target.closest(".chip[data-range]"); if (!c) return;
+  state.range = Number(c.dataset.range); state.page = 1; state.rangeUser = true;
+  renderRangeChips(); render();
+});
+$("#levelChips").addEventListener("click", e => {
+  const c = e.target.closest(".chip[data-level]"); if (!c) return;
+  state.level = c.dataset.level; state.page = 1; renderLevelChips(); render();
+});
+$("#flagChips").addEventListener("click", e => {
+  const c = e.target.closest(".chip[data-flag]"); if (!c) return;
+  const v = c.dataset.flag;
+  state.flags.has(v) ? state.flags.delete(v) : state.flags.add(v);
+  state.page = 1; renderFlagChips(); render();
+});
+$("#compChips").addEventListener("click", e => {
+  const c = e.target.closest(".chip[data-comp]"); if (!c) return;
+  const v = c.dataset.comp;
+  state.comps.has(v) ? state.comps.delete(v) : state.comps.add(v);
+  state.page = 1; renderCompChips(); render();
+});
+$("#search").addEventListener("input", e => { state.search = e.target.value.trim(); state.page = 1; render(); });
+$("#sortSelect").addEventListener("change", e => { state.sort = e.target.value; state.page = 1; render(); });
+document.querySelectorAll("table.models thead th.sortable").forEach(th => {
+  th.addEventListener("click", () => { state.sort = th.dataset.sort; state.page = 1; render(); });
+});
+// 分页按钮在顶部和底部各一套，用委托统一处理
+document.addEventListener("click", e => {
+  const b = e.target.closest("#pager button[data-page], #pagerTop button[data-page]");
+  if (!b || b.disabled) return;
+  const pages = pageCount(filtered().length);
+  const n = Number(b.dataset.page);
+  if (!n || n < 1 || n > pages || n === state.page) return;
+  state.page = n;
+  render();
+  // 顶部翻页就停在顶部，底部翻页回到列表开头
+  if (!b.closest("#pagerTop")) {
+    document.getElementById("latest").scrollIntoView({ behavior: "smooth", block: "start" });
+  }
+});
+$("#viewSeg").addEventListener("click", e => {
+  const b = e.target.closest("button[data-view]"); if (!b) return;
+  state.view = b.dataset.view;
+  $("#viewSeg").querySelectorAll("button").forEach(x => x.classList.toggle("on", x === b));
+  render();
+});
+$("#reloadBtn").addEventListener("click", load);
+document.addEventListener("keydown", e => {
+  if (e.key === "/" && document.activeElement !== $("#search")) {
+    e.preventDefault(); $("#search").focus();
+  }
+});
+
+load();
+
+</script>
+</body>
+</html>
