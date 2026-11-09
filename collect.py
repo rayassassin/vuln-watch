@@ -1318,40 +1318,42 @@ def _render_item(idx: int, v: dict, full: bool = True) -> list[str]:
     return lines
 
 
-def _red(text: str) -> str:
+# 消息抬头统一品牌名。三条消息（日报 / 巡检 / 降级）共用，改一处即可全改。
+BRAND = "AIRadix · Vul Watch · 漏洞情报"
+
+
+def _main_url(cfg: dict | None) -> str:
+    """看板主入口。web.public_url 是当前对外正式使用的那条，没配就返回空串。"""
+    web = (cfg or {}).get("web") or {}
+    return str(web.get("public_url") or "").strip()
+
+
+def _title(icon: str, suffix: str, cfg: dict | None) -> str:
     """
-    企业微信 markdown 的字体颜色只有三档（info 绿 / comment 灰 / warning 橙红），
-    没有纯红，warning 是最接近红色的那一档。
+    抬头行：**标题本身就是看板链接**，不再单列一行「全景看板 + 裸地址」。
 
-    极个别老通道不认 <font> 标签，会把标签当文本原样吐出来。
-    真遇到就把环境变量 VW_NO_FONT_COLOR=1 打开，退回纯加粗，其余不动。
+    一条消息里最该被点的就是看板，把它放在抬头最顺手的位置；
+    文字与链接合并后也省下一行，40 来字节在 2048 的额度里不算小数目。
+
+    suffix 是状态后缀（时间 / 无新增 / 巡检异常），保留是为了在聊天列表的
+    消息预览里也能一眼看出结论。
     """
-    if os.environ.get("VW_NO_FONT_COLOR", "").strip().lower() in ("1", "true", "yes", "on"):
-        return text
-    return f'<font color="warning">{text}</font>'
+    label = f"{icon} {BRAND}" + (f" · {suffix}" if suffix else "")
+    url = _main_url(cfg)
+    return _md_link(label, url) if url else f"**{label}**"
 
 
-def _dashboard_link(cfg: dict | None) -> str:
+def _backup_link(cfg: dict | None) -> str:
     """
-    消息尾部的全景看板入口。
-
-    支持两个地址，理由是看板现在有两条独立链路（GitHub Pages 与自有服务器容器），
-    一条挂了另一条还能看，日报里就该同时给出，而不是等人来问「页面打不开」。
-      web.public_url  主地址（当前对外正式使用的那条）
-      web.backup_url  备用地址（可留空；留空则不渲染）
-    两个都没配就返回空串，绝不硬编码一个可能已经挂掉的地址。
+    备用入口。主入口已经并进抬头，这里只留双活里的另一条链路。
+    web.backup_url 留空则整行不渲染——绝不硬编码一个可能已经挂掉的地址。
     """
     web = (cfg or {}).get("web") or {}
-    main = str(web.get("public_url") or "").strip()
+    main = _main_url(cfg)
     backup = str(web.get("backup_url") or "").strip()
-    lines = []
-    # 企业微信 markdown 的字体颜色只有三档（info 绿 / comment 灰 / warning 橙红），
-    # 没有纯红，"warning" 是最接近红色的那一档。文字本身作为链接文本，不另贴裸地址。
-    if main:
-        lines.append(_red(f"**[🌐 漏洞情报全景看板]({main})**"))
-    if backup and backup != main:
-        lines.append(_red(f"**[🔁 备用入口]({backup})**"))
-    return "\n".join(lines)
+    if not backup or backup == main:
+        return ""
+    return f"🔁 备用入口　**[打开备用]({backup})**"
 
 
 def render_markdown(items: list[dict], stats: dict, cfg: dict | None = None) -> str:
@@ -1371,7 +1373,7 @@ def render_markdown(items: list[dict], stats: dict, cfg: dict | None = None) -> 
     p2 = [i for i in items if i["level"] == "P2"]
 
     lines = [
-        f"**🛡 漏洞情报全景 · {until.strftime('%m月%d日 %H:%M')}**",
+        _title("🛡", until.strftime("%m月%d日 %H:%M"), cfg),
         "",
         f"📅 统计区间　{since.strftime('%m-%d %H:%M')} → {until.strftime('%m-%d %H:%M')}",
         f"📊 采集 **{scanned}** 条 · 命中 **{len(items)}** 条",
@@ -1407,9 +1409,9 @@ def render_markdown(items: list[dict], stats: dict, cfg: dict | None = None) -> 
             lines.append(f"{row} · {label}" if label else row)
         lines.append("")
 
-    link = _dashboard_link(cfg)
-    if link:
-        lines += [SEP, "", link]
+    backup = _backup_link(cfg)
+    if backup:
+        lines += [SEP, "", backup]
 
     return "\n".join(lines).strip()
 
@@ -1422,7 +1424,7 @@ def render_degraded(stats: dict, cfg: dict | None = None) -> str:
     """
     until = stats["until"]
     lines = [
-        f"**⚠️ 漏洞情报巡检异常 · {until.strftime('%m月%d日')}**",
+        _title("⚠️", f"巡检异常 {until.strftime('%m-%d')}", cfg),
         "",
         f"📅 统计区间　{stats['since'].strftime('%m-%d %H:%M')} → {until.strftime('%m-%d %H:%M')}",
         f"📊 采集 {stats.get('scanned', 0)} 条，没有可推送条目",
@@ -1436,9 +1438,9 @@ def render_degraded(stats: dict, cfg: dict | None = None) -> str:
         "修复网络或代理后手动补跑一次：",
         "`./run.sh --days 1`",
     ]
-    link = _dashboard_link(cfg)
-    if link:
-        lines += ["", link]
+    backup = _backup_link(cfg)
+    if backup:
+        lines += ["", backup]
     return "\n".join(lines)
 
 
@@ -1456,12 +1458,9 @@ def render_patrol(stats: dict, cfg: dict | None = None) -> str:
     since = stats["since"]
     scanned = stats.get("scanned", 0)
     sources = stats.get("sources", [])
-    web = (cfg or {}).get("web") or {}
-    main = str(web.get("public_url") or "").strip()
-    backup = str(web.get("backup_url") or "").strip()
 
     lines = [
-        "**🛡 漏洞巡检 · 无新增** 🌶️",
+        _title("🛡", "无新增 🌶️", cfg),
         f"时间：{until.strftime('%Y-%m-%d %H:%M:%S')}",
         f"巡检：近 24h 扫描 {scanned} 条 → 命中 **0** 条",
     ]
@@ -1473,10 +1472,9 @@ def render_patrol(stats: dict, cfg: dict | None = None) -> str:
         "> 各数据源正常，本轮无需处置。",
         "> 有新增漏洞才会推送给可见范围内所有人。",
     ]
-    if main:
-        lines.append("> " + _red(f"**[🌐 漏洞情报全景看板]({main})**"))
+    backup = _backup_link(cfg)
     if backup:
-        lines.append("> 🔁 备用入口 " + _red(f"**[打开备用]({backup})**"))
+        lines.append("> " + backup)
     return "\n".join(lines)
 
 
@@ -2115,15 +2113,28 @@ def main() -> int:
     log(f"过滤后待推送 {len(items)} 条 "
         f"(P0 {len(by_level['P0'])} / P1 {len(by_level['P1'])} / P2 {len(by_level['P2'])} 待选)")
 
-    # 统计本轮实际有数据返回的源，报告里如实列出，不虚标
-    srcs: list[str] = []
+    # 统计每个源实际拿回多少条。只列"有数据"的源会让人误以为其余源没跑——
+    # 周日 GitHub/OSV 真的是 0 条，看着就像采集缩水了。查过的源一律带数字列出来，
+    # 0 是结论，不是缺席。KEV / EPSS 是富化步骤，不计条数。
+    counts: dict[str, int] = {}
     for i in raw:
         name = i["source"].split("/")[0].split(":")[0]
-        if name not in srcs:
-            srcs.append(name)
-    for extra in ("KEV", "EPSS"):
-        if extra not in srcs:
-            srcs.append(extra)
+        counts[name] = counts.get(name, 0) + 1
+
+    queried: list[str] = []
+    nvd_cfg = cfg.get("nvd") or {}
+    if nvd_cfg.get("cnas") or nvd_cfg.get("keywords"):
+        queried.append("NVD")
+    if cfg.get("gh_ecosystems"):
+        queried.append("GitHub")
+    if (cfg.get("osv") or {}).get("assets"):
+        queried.append("OSV")
+    if (cfg.get("feeds") or {}).get("packagist_api"):
+        queried.append("Packagist")
+
+    srcs: list[str] = [f"{n} {counts.get(n, 0)}" for n in queried]
+    srcs += [f"{n} {c}" for n, c in counts.items() if n not in queried]
+    srcs += ["KEV", "EPSS"]
 
     # 源可用性：网络挂掉和"今天真的没漏洞"在消息里必须能区分开。
     # 否则一次代理故障就会伪装成一切太平。
