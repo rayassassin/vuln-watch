@@ -513,34 +513,34 @@ def _extract_osv_severity(v: dict) -> float:
 IMPACT_RULES: list[tuple[tuple[str, ...], str]] = [
     (("remote code execution", "arbitrary code", "code execution", "command injection",
       "代码执行", "命令执行", "rce"),
-     "远程代码执行，攻击者可在服务器上执行任意命令，等同拿下主机"),
+     "远程代码执行，可执行任意命令"),
     (("deserialization", "反序列化"),
-     "反序列化漏洞，构造恶意对象即可触发代码执行，常被用于拿 shell"),
+     "反序列化，可触发代码执行"),
     (("authentication bypass", "auth bypass", "improper authentication", "authentication by capture",
       "认证绕过", "身份验证绕过"),
-     "身份认证绕过，未授权即可访问受保护资源，常被用于直接进入后台"),
+     "认证绕过，未授权即可访问受保护资源"),
     (("path traversal", "directory traversal", "path equivalence", "路径遍历", "目录遍历"),
-     "路径遍历，可越权读取或写入服务器文件，通常可进一步提权或植入后门"),
+     "路径遍历，可越权读写服务器文件"),
     (("sql injection", "sql注入"),
-     "SQL 注入，可读取或篡改数据库内容，严重时可写入文件获取权限"),
+     "SQL 注入，可读写数据库"),
     (("cross-site scripting", "xss", "跨站脚本"),
-     "跨站脚本，可窃取管理员会话，进而劫持后台操作"),
+     "跨站脚本，可窃取管理员会话"),
     (("ssrf", "server-side request forgery"),
-     "SSRF，可借服务器身份探测或攻击内网，绕过边界防护"),
+     "SSRF，可借服务器身份探测内网"),
     (("xslt", "template injection", "表达式注入", "el injection"),
-     "模板或表达式注入，可能演变为任意代码执行"),
+     "模板注入，可能演变为代码执行"),
     (("privilege escalation", "elevation of privilege", "权限提升"),
-     "权限提升，可从低权限账户获取更高权限"),
+     "权限提升，可获取更高权限"),
     (("information disclosure", "information leak", "sensitive data", "missing encryption",
       "信息泄露", "敏感信息"),
-     "敏感信息泄露，可能暴露凭据、密钥或业务数据"),
+     "信息泄露，可能暴露凭据或业务数据"),
     (("denial of service", "resource exhaustion", "throttling", "dos", "拒绝服务"),
-     "拒绝服务，可致服务不可用，影响业务连续性"),
+     "拒绝服务，可致业务中断"),
     (("improper access control", "incorrect authorization", "improper authorization",
       "authorization bypass", "越权"),
-     "访问控制缺陷，可越权访问他人或管理员数据"),
+     "访问控制缺陷，可越权访问他人数据"),
     (("improper input validation", "improper neutralization", "输入验证"),
-     "输入校验不严，可被构造恶意请求触发异常行为，常是其他漏洞的入口"),
+     "输入校验不严，可被恶意请求触发异常"),
 ]
 
 AV_LABEL = {"N": "可远程利用", "A": "需相邻网络", "L": "需本地访问", "P": "需物理接触"}
@@ -1215,6 +1215,11 @@ def _md_link(text: str, url: str, bold: bool = True) -> str:
     return f"**[{text}]({url})**" if bold else f"[{text}]({url})"
 
 
+def _has_cjk(text: str) -> bool:
+    """文本里有没有汉字。用来判断一句标题是不是已经"人话化"过。"""
+    return any("\u4e00" <= ch <= "\u9fff" for ch in (text or ""))
+
+
 def _clip(text: str, limit: int) -> str:
     """按词边界截断，别把 `Trigger.dev before 4.5.6` 切成 `... sel…` 这种断词。"""
     text = (text or "").strip()
@@ -1261,61 +1266,31 @@ def _vp_label(v: dict, limit: int = 34) -> str:
     return ""
 
 
-def _item_head(idx: int, v: dict) -> str:
-    """条目标题行：编号本身是可点链接，后面跟「厂商 / 组件」。"""
+def _render_line(idx: int, v: dict, limit: int = 46) -> str:
+    """
+    单条漏洞压成一行：`1. CVE-2026-35002 · Agno：远程未授权攻击者可读取敏感数据`
+
+    篇幅就是成本。企业微信一条 markdown 装不下几十行，多行描述会把后面的条目
+    挤掉——客户端直接截断，看着像漏报。所以分数、范围、处置全部收进编号链接里，
+    行内只留判断"要不要管"必需的三样：编号（可点）、是谁家的东西、会出什么事。
+    """
     cve = v["cve"] or v["key"]
-    head = _md_link(f"{idx}. {cve}", v.get("url", ""))
+    link = _md_link(f"{idx}. {cve}", v.get("url", ""))
+    # label 可能是真厂商/产品，也可能只是标题片段兜底；后者再追加影响就是同一句话说两遍
+    has_vp = bool(_component_name(v) or _vendor_name(v))
     label = _vp_label(v)
-    return f"{head} · {label}" if label else head
-
-
-def _render_item(idx: int, v: dict, full: bool = True) -> list[str]:
-    """
-    单条漏洞的多行描述。信息密度优先，但不堆砌。
-
-    full=True 用于 P0：影响 + 条件 + 范围 + 处置
-    full=False 用于紧凑列表：只留影响与条件各一行，把篇幅让给条数
-    详情链接已并入编号（点编号直达原文），不再单占一行。
-    """
-    head = _item_head(idx, v)
-
-    # 第二行：分数 + 关键标签
-    cvss_str = f"CVSS {v['cvss']:.1f}" if v.get("cvss_exact") else f"CVSS≈{v['cvss']:.1f}"
-    tags = [cvss_str]
-    if v["kev"]:
-        tags.append("已进 KEV")
-    if v["epss"] > 0:
-        tags.append(f"EPSS {v['epss']:.0%}")
-    if v.get("ransomware") == "Known":
-        tags.append("勒索软件在用")
-    lines = [head, "　" + " ｜ ".join(tags)]
-
-    # 影响：被利用之后会怎样
-    lim = 70 if full else 48
-    if v.get("impact"):
-        lines.append(f"　▸ {v['impact']}")
-    elif v.get("title"):
-        t = v["title"][:lim]
-        lines.append(f"　▸ {t}")
-
-    # 攻击条件：谁能打、要不要登录
-    if v.get("attack_cond"):
-        lines.append(f"　▸ {v['attack_cond']}")
-
-    if not full:
-        # 紧凑模式到此为止；详情入口已并入编号，不再多占一行
-        return lines
-
-    # 受影响范围
-    rng = v.get("affected_range") or v.get("asset_version")
-    if rng and rng != "未指定":
-        lines.append(f"　▸ 范围：{rng[:80]}")
-
-    # CISA 官方处置动作，比自拟建议权威（但是模板文字会压掉）
-    action = _short_action(v.get("cisa_action", ""))
-    if action:
-        lines.append(f"　▸ 处置：{action}")
-    return lines
+    # 后果：优先用识别出的中文影响；退回标题时只认中文标题——
+    # 半句英文原文比没有更吵，点编号就能看全文，不必塞进来
+    impact = (v.get("impact") or "").strip()
+    if not impact:
+        raw = (v.get("title") or "").strip()
+        impact = raw if _has_cjk(raw) else ""
+    impact = _clip(impact, limit)
+    if has_vp:
+        return f"{link} · {label}：{impact}" if impact else f"{link} · {label}"
+    if label:
+        return f"{link} · {label}"
+    return f"{link}：{impact}" if impact else link
 
 
 # 消息抬头统一品牌名。三条消息（日报 / 巡检 / 降级）共用，改一处即可全改。
@@ -1385,29 +1360,24 @@ def render_markdown(items: list[dict], stats: dict, cfg: dict | None = None) -> 
         lines.append(f"⚠️ {'；'.join(stats['degraded'])}")
 
     idx = 0
-    # 日报控制在一条消息内看完：P0 详述、P1 紧凑、P2 只留编号
-    if p0:
-        lines += ["", SEP, "", f"**🔴 立即处置（{len(p0)} 条）**", ""]
-        for v in p0:
+    # 横线以下只保留「分组标题 + 一行一条」：条目一多，多行格式会被客户端截断，
+    # 少了的分组比不详细更致命。分数/范围/处置点编号进原文看。
+    body: list[str] = []
+    for icon, name, group in (
+        ("🔴", "立即处置", p0),
+        ("🟠", "本周处置", p1),
+        ("🟡", "观察", p2),
+    ):
+        if not group:
+            continue
+        if body:
+            body.append("")
+        body.append(f"**{icon} {name}**")
+        for v in group:
             idx += 1
-            lines += _render_item(idx, v, full=True)
-            lines.append("")
-
-    if p1:
-        lines += [SEP, "", f"**🟠 本周处置（{len(p1)} 条）**", ""]
-        for v in p1:
-            idx += 1
-            lines += _render_item(idx, v, full=False)
-            lines.append("")
-
-    # 观察列表：编号带链接 + 「厂商 / 组件」，只列编号等于让人去搜
-    if p2:
-        lines += [SEP, "", f"**🟡 观察列表（{len(p2)} 条）**", ""]
-        for v in p2:
-            label = _vp_label(v)
-            row = "　" + _md_link(v["cve"] or v["key"], v.get("url", ""), bold=False)
-            lines.append(f"{row} · {label}" if label else row)
-        lines.append("")
+            body.append(_render_line(idx, v))
+    if body:
+        lines += ["", SEP, ""] + body
 
     backup = _backup_link(cfg)
     if backup:
