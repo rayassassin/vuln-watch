@@ -1318,6 +1318,18 @@ def _title(icon: str, suffix: str, cfg: dict | None) -> str:
     return _md_link(label, url) if url else f"**{label}**"
 
 
+def _read_more(cfg: dict | None) -> str:
+    """
+    消息最底部的「阅读原文」，指向看板。
+
+    抬头已经是链接了，这里再来一条不是重复：抬头在滚动后会被顶出屏幕，
+    底部这条是"看完列表想深入看"时的落点，位置正合手。
+    文字即链接，不贴裸地址。
+    """
+    url = _main_url(cfg)
+    return f"**[📖 阅读原文]({url})**" if url else ""
+
+
 def _backup_link(cfg: dict | None) -> str:
     """
     备用入口。主入口已经并进抬头，这里只留双活里的另一条链路。
@@ -1379,6 +1391,10 @@ def render_markdown(items: list[dict], stats: dict, cfg: dict | None = None) -> 
     if body:
         lines += ["", SEP, ""] + body
 
+    footer = _read_more(cfg)
+    if footer:
+        lines += ["", footer]
+
     backup = _backup_link(cfg)
     if backup:
         lines += [SEP, "", backup]
@@ -1408,6 +1424,9 @@ def render_degraded(stats: dict, cfg: dict | None = None) -> str:
         "修复网络或代理后手动补跑一次：",
         "`./run.sh --days 1`",
     ]
+    footer = _read_more(cfg)
+    if footer:
+        lines += ["", footer]
     backup = _backup_link(cfg)
     if backup:
         lines += ["", backup]
@@ -1440,8 +1459,11 @@ def render_patrol(stats: dict, cfg: dict | None = None) -> str:
         f"窗口：{since.strftime('%m-%d %H:%M')} → {until.strftime('%m-%d %H:%M')}",
         "",
         "> 各数据源正常，本轮无需处置。",
-        "> 有新增漏洞才会推送给可见范围内所有人。",
+        "> 有新增漏洞才会通知负责人跟进。",
     ]
+    footer = _read_more(cfg)
+    if footer:
+        lines.append("> " + footer)
     backup = _backup_link(cfg)
     if backup:
         lines.append("> " + backup)
@@ -1743,10 +1765,14 @@ def _load_app_creds(cfg: dict) -> dict:
     """
     企业微信自建应用凭据。优先级：环境变量 > 0600 的 env 文件。
     凭证永远不进配置文件、不进仓库，这是硬约束。
+
+    顺带把「广播名单」一起读进来：WX_TOPARTY（部门号）、WX_TOUSER_ALL（额外抄送人）。
+    名单属于组织信息，跟密钥一样不该出现在公开仓库里，所以同样走 env 文件。
     """
-    keys = ("WX_CORPID", "WX_SECRET", "WX_AGENTID")
+    keys = ("WX_CORPID", "WX_SECRET", "WX_AGENTID", "WX_TOPARTY", "WX_TOUSER_ALL")
+    required = ("WX_CORPID", "WX_SECRET", "WX_AGENTID")
     creds = {k: os.environ.get(k, "").strip() for k in keys}
-    if all(creds.values()):
+    if all(creds[k] for k in keys):
         return creds
 
     env_file = (
@@ -1763,7 +1789,7 @@ def _load_app_creds(cfg: dict) -> dict:
                 k, v = line.split("=", 1)
                 if k.strip() in keys and not creds.get(k.strip()):
                     creds[k.strip()] = v.strip()
-        else:
+        elif not all(creds[k] for k in required):
             log(f"  ! 应用凭据文件不存在：{p}")
     return creds
 
@@ -1779,29 +1805,37 @@ def _app_access_token(corpid: str, secret: str) -> str:
     return body["access_token"]
 
 
-def _resolve_app_touser(cfg: dict, broadcast: bool) -> str:
+def _resolve_app_recipients(cfg: dict, creds: dict, broadcast: bool) -> tuple[str, str]:
     """
-    应用消息收件人，两种口径：
+    应用消息收件人，返回 (touser, toparty)。两种口径：
 
       broadcast=False  巡检心跳 / 故障告警 —— 只发授权人本人，最不打扰
-      broadcast=True   真抓到新漏洞   —— 发给应用可见范围内所有人（@all）
+      broadcast=True   真抓到新漏洞   —— 部门全体（toparty）+ 指定人员（touser）
 
-    @all 由企业微信按「应用的可见范围」展开，不会越界发到范围外的人；
-    想缩小范围就去企微后台改应用可见范围，别在代码里维护名单。
+    名单不进仓库：WX_TOPARTY 是部门号，WX_TOUSER_ALL 是额外要抄送的人，竖线分隔。
+    两者都取不到就退回只发本人——宁可发窄，也不能因为名单丢了把消息吞掉。
     """
     personal = (
         os.environ.get(cfg["wecom"].get("touser_env", "WX_TOUSER"), "").strip()
         or str(cfg["wecom"].get("touser") or "").strip()
         or _resolve_chat_id(cfg)
     )
-    if broadcast:
-        every = (
-            os.environ.get(cfg["wecom"].get("broadcast_touser_env", "WX_TOUSER_ALL"), "").strip()
-            or str(cfg["wecom"].get("broadcast_touser") or "").strip()
-        )
-        if every:
-            return every
-    return personal
+    if not broadcast:
+        return personal, ""
+
+    toparty = (
+        os.environ.get(cfg["wecom"].get("broadcast_toparty_env", "WX_TOPARTY"), "").strip()
+        or str(cfg["wecom"].get("broadcast_toparty") or "").strip()
+        or str(creds.get("WX_TOPARTY") or "").strip()
+    )
+    others = (
+        os.environ.get(cfg["wecom"].get("broadcast_touser_env", "WX_TOUSER_ALL"), "").strip()
+        or str(cfg["wecom"].get("broadcast_touser") or "").strip()
+        or str(creds.get("WX_TOUSER_ALL") or "").strip()
+    )
+    if toparty or others:
+        return others, toparty
+    return personal, ""
 
 
 def push_wecom_app(text: str, cfg: dict, broadcast: bool = False) -> bool:
@@ -1817,8 +1851,8 @@ def push_wecom_app(text: str, cfg: dict, broadcast: bool = False) -> bool:
         log(f"! 自建应用凭据缺失：{','.join(missing)}，跳过推送")
         return False
 
-    touser = _resolve_app_touser(cfg, broadcast)
-    if not touser:
+    touser, toparty = _resolve_app_recipients(cfg, creds, broadcast)
+    if not touser and not toparty:
         log("! 未能确定应用消息收件人（设置环境变量 WX_TOUSER 或配置 wecom.touser）")
         return False
 
@@ -1831,11 +1865,13 @@ def push_wecom_app(text: str, cfg: dict, broadcast: bool = False) -> bool:
     # 应用消息 markdown 上限 2048 字节，实际按 1800 切，留出多段续标的空间
     limit = min(int(cfg["wecom"]["max_bytes"]), int(cfg["wecom"].get("app_max_bytes", 1800)))
 
-    def send_chunks(target: str) -> bool:
+    def send_chunks(target: str, part: str = "") -> bool:
         all_ok = True
         for idx, chunk in enumerate(split_with_continuation(text, limit), 1):
             payload = {
                 "touser": target,
+                "toparty": part,
+                "totag": "",
                 "msgtype": "markdown",
                 "agentid": int(creds["WX_AGENTID"]),
                 "markdown": {"content": chunk},
@@ -1851,19 +1887,20 @@ def push_wecom_app(text: str, cfg: dict, broadcast: bool = False) -> bool:
                     all_ok = False
                 else:
                     log(f"  应用推送第 {idx} 段成功（{len(chunk.encode('utf-8'))} 字节）")
-                    if body.get("invaliduser"):
-                        log(f"  ! 以下收件人无效：{body['invaliduser']}")
+                    for key in ("invaliduser", "invalidparty"):
+                        if body.get(key):
+                            log(f"  ! 以下收件人/部门无效：{body[key]}")
             except Exception as exc:  # noqa: BLE001
                 log(f"  ! 应用推送异常：{exc}")
                 all_ok = False
             time.sleep(1)
         return all_ok
 
-    ok = send_chunks(touser)
+    ok = send_chunks(touser, toparty)
     if not ok and broadcast:
-        personal = _resolve_app_touser(cfg, broadcast=False)
+        personal, _ = _resolve_app_recipients(cfg, creds, broadcast=False)
         if personal and personal != touser:
-            log(f"  ! 广播给 {touser} 未成功，降级只发授权人，避免消息丢失")
+            log("  ! 广播未成功，降级只发授权人，避免消息丢失")
             ok = send_chunks(personal)
     return ok
 
