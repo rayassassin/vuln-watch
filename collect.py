@@ -1642,6 +1642,20 @@ def split_by_bytes(text: str, max_bytes: int) -> list[str]:
     return chunks
 
 
+def split_with_continuation(text: str, max_bytes: int) -> list[str]:
+    """
+    按字节切段，并给后续段落补「（续 2/3）」抬头。
+
+    不补的话，第二条消息从列表中间开始，收到的人只会觉得上一条被截断了——
+    和真的丢内容一模一样。抬头只占二十来字节，换来「这是续段不是残缺」的确定性。
+    """
+    chunks = split_by_bytes(text, max_bytes)
+    if len(chunks) <= 1:
+        return chunks
+    total = len(chunks)
+    return [chunks[0]] + [f"**（续 {i}/{total}）**\n{c}" for i, c in enumerate(chunks[1:], 2)]
+
+
 def push_wecom(text: str, cfg: dict) -> bool:
     """推送到企业微信群机器人"""
     hook = os.environ.get(cfg["wecom"]["webhook_env"], "").strip()
@@ -1649,7 +1663,7 @@ def push_wecom(text: str, cfg: dict) -> bool:
         log(f"! 未设置环境变量 {cfg['wecom']['webhook_env']}，跳过推送")
         return False
     ok = True
-    for idx, chunk in enumerate(split_by_bytes(text, cfg["wecom"]["max_bytes"]), 1):
+    for idx, chunk in enumerate(split_with_continuation(text, cfg["wecom"]["max_bytes"]), 1):
         try:
             resp = requests.post(hook, json={"msgtype": "markdown", "markdown": {"content": chunk}}, timeout=15)
             body = resp.json()
@@ -1701,7 +1715,7 @@ def push_wecom_cli(text: str, cfg: dict) -> bool:
         return False
 
     ok = True
-    for idx, chunk in enumerate(split_by_bytes(text, cfg["wecom"]["max_bytes"]), 1):
+    for idx, chunk in enumerate(split_with_continuation(text, cfg["wecom"]["max_bytes"]), 1):
         payload = {"chat_id": chat_id, "msg_type": "markdown", "markdown": {"content": chunk}}
         try:
             r = subprocess.run(
@@ -1819,7 +1833,7 @@ def push_wecom_app(text: str, cfg: dict, broadcast: bool = False) -> bool:
 
     def send_chunks(target: str) -> bool:
         all_ok = True
-        for idx, chunk in enumerate(split_by_bytes(text, limit), 1):
+        for idx, chunk in enumerate(split_with_continuation(text, limit), 1):
             payload = {
                 "touser": target,
                 "msgtype": "markdown",
