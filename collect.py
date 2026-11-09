@@ -1805,6 +1805,56 @@ def _app_access_token(corpid: str, secret: str) -> str:
     return body["access_token"]
 
 
+def _norm_ids(raw: str) -> str:
+    """
+    把「部门号 / 成员号」列表归一化成企微要求的竖线分隔。
+
+    message/send 的多值分隔符是 `|`（文档原话：多个接收者用 `|` 分隔），
+    但手写 env 时很容易顺手敲成逗号。这里统一收口：无论写 `205,223`、`205|223`
+    还是全角逗号，都收敛成合法值，并顺手去重保序。
+
+    为什么值得单独一个函数：分隔符写错不会报错，只会被企微当成一个非法 ID，
+    返回 invalidparty 或直接 81013，看着像「部门不存在」，排查很费劲。
+    """
+    if not raw:
+        return ""
+    buf = raw
+    for ch in (",", ";", "，", "；", "\t", "\r", "\n", " "):
+        buf = buf.replace(ch, "|")
+    seen: set[str] = set()
+    out: list[str] = []
+    for part in buf.split("|"):
+        part = part.strip()
+        if part and part not in seen:
+            seen.add(part)
+            out.append(part)
+    return "|".join(out)
+
+
+def _visible_parties(token: str, agentid: str) -> set[str]:
+    """
+    应用可见范围的部门号集合。查不到（网络/权限异常）返回空集合，含义是「不校验」。
+
+    用途：部门号不在可见范围内时，企微会让整条 message/send 失败
+    （81013 之类），连带把这一轮真正命中的漏洞一起吞掉。发送前先过滤，
+    宁可少发一个部门，也不能整条消息发不出去。
+    """
+    try:
+        resp = requests.get(
+            "https://qyapi.weixin.qq.com/cgi-bin/agent/get",
+            params={"access_token": token, "agentid": agentid}, timeout=15,
+        )
+        body = resp.json()
+        if body.get("errcode"):
+            log("  ! 读取应用可见范围失败：errcode=" + str(body.get("errcode"))
+                + " " + str(body.get("errmsg")))
+            return set()
+        return {str(p) for p in (body.get("allow_partys") or {}).get("partyid") or []}
+    except Exception as exc:  # noqa: BLE001
+        log("  ! 读取应用可见范围异常：" + str(exc))
+        return set()
+
+
 def _resolve_app_recipients(cfg: dict, creds: dict, broadcast: bool) -> tuple[str, str]:
     """
     应用消息收件人，返回 (touser, toparty)。两种口径：
@@ -1812,8 +1862,8 @@ def _resolve_app_recipients(cfg: dict, creds: dict, broadcast: bool) -> tuple[st
       broadcast=False  巡检心跳 / 故障告警 —— 只发授权人本人，最不打扰
       broadcast=True   真抓到新漏洞   —— 部门全体（toparty）+ 指定人员（touser）
 
-    名单不进仓库：WX_TOPARTY 是部门号，WX_TOUSER_ALL 是额外要抄送的人，竖线分隔。
-    两者都取不到就退回只发本人——宁可发窄，也不能因为名单丢了把消息吞掉。
+    名单不进仓库：WX_TOPARTY 是部门号（竖线分隔，可多个），WX_TOUSER_ALL 是
+    额外要抄送的人。两者都取不到就退回只发本人——宁可发窄，也不能因为名单丢了把消息吞掉。
     """
     personal = (
         os.environ.get(cfg["wecom"].get("touser_env", "WX_TOUSER"), "").strip()
@@ -1821,7 +1871,7 @@ def _resolve_app_recipients(cfg: dict, creds: dict, broadcast: bool) -> tuple[st
         or _resolve_chat_id(cfg)
     )
     if not broadcast:
-        return personal, ""
+        return _norm_ids(personal), ""
 
     toparty = (
         os.environ.get(cfg["wecom"].get("broadcast_toparty_env", "WX_TOPARTY"), "").strip()
@@ -1834,8 +1884,8 @@ def _resolve_app_recipients(cfg: dict, creds: dict, broadcast: bool) -> tuple[st
         or str(creds.get("WX_TOUSER_ALL") or "").strip()
     )
     if toparty or others:
-        return others, toparty
-    return personal, ""
+        return _norm_ids(others), _norm_ids(toparty)
+    return _norm_ids(personal), ""
 
 
 def push_wecom_app(text: str, cfg: dict, broadcast: bool = False) -> bool:
@@ -1861,6 +1911,20 @@ def push_wecom_app(text: str, cfg: dict, broadcast: bool = False) -> bool:
     except Exception as exc:  # noqa: BLE001
         log(f"! 获取 access_token 失败：{exc}")
         return False
+
+    # 部门号必须落在应用可见范围内，否则企微会让整条 message/send 失败，
+    # 连带把这一轮真正命中的漏洞一起吞掉。发送前先过滤：查得到就过滤，查不到就不拦。
+    if broadcast and toparty:
+        visible = _visible_parties(token, creds["WX_AGENTID"])
+        if visible:
+            keep = [p for p in toparty.split("|") if p in visible]
+            drop = [p for p in toparty.split("|") if p not in visible]
+            if drop:
+                log("  ! 以下部门不在应用可见范围内，已剔除：" + ",".join(drop))
+            toparty = "|".join(keep)
+            if not toparty and not touser:
+                log("! 可见范围内无可用部门，退回只发授权人")
+                touser, toparty = _resolve_app_recipients(cfg, creds, broadcast=False)
 
     # 应用消息 markdown 上限 2048 字节，实际按 1800 切，留出多段续标的空间
     limit = min(int(cfg["wecom"]["max_bytes"]), int(cfg["wecom"].get("app_max_bytes", 1800)))
@@ -1896,6 +1960,7 @@ def push_wecom_app(text: str, cfg: dict, broadcast: bool = False) -> bool:
             time.sleep(1)
         return all_ok
 
+    log("  收件口径：部门=" + (toparty or "-") + " 人员=" + (touser or "-"))
     ok = send_chunks(touser, toparty)
     if not ok and broadcast:
         personal, _ = _resolve_app_recipients(cfg, creds, broadcast=False)

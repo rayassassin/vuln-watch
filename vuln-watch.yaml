@@ -202,7 +202,7 @@ wecom:
   touser_env: WX_TOUSER
   # 有新增漏洞时的收件人：部门全体 + 额外抄送人。
   # 名单属于组织信息，不进公开仓库 —— 由服务器 env 文件注入：
-  #   WX_TOPARTY     部门号，逗号分隔可多个
+  #   WX_TOPARTY     部门号，竖线分隔可多个（逗号/全角逗号也兼容，发送前会归一化）
   #   WX_TOUSER_ALL  额外抄送人，竖线分隔
   # 两者都为空就退化为只发 touser（宁可发窄，也不炸群）；广播失败也会自动降级为只发本人。
   broadcast_toparty: ""
